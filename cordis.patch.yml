@@ -1,0 +1,4 @@
+- insert:
+    - id: channel-hub
+      name: dsh-channel-hub
+      config: {}
