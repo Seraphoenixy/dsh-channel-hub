@@ -45,6 +45,7 @@ import {
   GEMINI_DEFAULT_PROJECT,
   GEMINI_IDLE_TIMEOUT_MS,
   GEMINI_SESSION_LANE_INFER,
+  GEMINI_SKIP_SIGNATURE,
   sanitizeGeminiSchema,
   sortedStringify,
 } from './gemini.js'
@@ -211,14 +212,44 @@ export function translateGeminiRequest(options: TranslateGeminiRequestOptions): 
     }
   }
 
+  /**
+   * **当前轮**的起点下标（从后往前找最后一条「带标准内容的 user 消息」）。
+   *
+   * ⚠️ 上游的重合规则原文：从最新往旧找最近一条**含标准内容（如 text）的用户
+   * 消息**，它之后的所有 model `functionCall` 属于同一轮；只校验**这一轮**里
+   * 每个 step 的首个 `functionCall` 是否带签名（更早的轮次不校验）。
+   *
+   * 因此哨兵值只该用在当前轮：给历史轮补哨兵是**编造**（那些轮次本就有自己的
+   * 签名，缓存命中时会被真实回填），而给历史轮补假签名会让「缓存命中」永远
+   * 无从体现。
+   *
+   * 「只含 functionResponse」的消息**不算**轮次起点（它属于同一轮的下一步）。
+   */
+  const turnStart = (() => {
+    for (let index = normalized.length - 1; index >= 0; index--) {
+      const message = normalized[index]
+      if (message.role !== 'user') continue
+      const standard = message.content.some(
+        (block) =>
+          (block.type === 'text' && block.text !== '') || block.type === 'image',
+      )
+      if (standard) return index
+    }
+    return 0
+  })()
+
   const contents: GeminiContent[] = []
-  for (const message of normalized) {
+  for (const [messageIndex, message] of normalized.entries()) {
     // System text is collected into systemInstruction, never a user turn.
     // `developer`（只承载工具增删元数据）由归一化层一并丢弃。
     if (message.role === 'system') continue
 
     const role = message.role === 'assistant' ? 'model' : 'user'
     const parts: GeminiPart[] = []
+    /** 本条消息内是否已给过签名（上游只要求每个 step 的**首个** FC 带）。 */
+    let signed = false
+    /** 本条消息是否属于上游会校验的**当前轮**。 */
+    const inCurrentTurn = messageIndex >= turnStart
 
     for (const block of message.content) {
       if (block.type === 'tool-call') {
@@ -227,11 +258,27 @@ export function translateGeminiRequest(options: TranslateGeminiRequestOptions): 
         const argsJson = canonicalArgs(args)
         // ⚠️ 签名只能从**本地缓存**查（DSH 的 `ReasoningBlock` 只有 text，
         // 不携带签名 —— 所以签名必须靠 `gemini-sigstore.ts` 落盘持久化）。
-        // 查不到就**不带签名发**：上游会拒（`IsSignatureError` 命中），
-        // 适配器据此走「去签重试一次」路径。
+        //
+        // ⚠️ **当前轮**的首个 `functionCall` 查不到真签名时，必须发哨兵值而不是
+        // 省略字段（真实报障，2026-10-21）：上游对当前轮每个 step 的首个
+        // `functionCall` 强制校验签名，缺失即 400
+        // `Function call is missing a thought_signature in functionCall parts`。
+        // 省略字段等于把「缓存没命中」变成「整轮工具循环报废」；哨兵值是上游
+        // 文档明示的最后手段（跳过校验、略微降质），比 400 好得多。
+        //
+        // ⚠️ **历史轮不补哨兵**：那些轮次不参与校验，而它们自己的签名在缓存命中
+        // 时会被真实回填 —— 补假签名会让真实命中无从体现。
         const signature = options.lookupSignature?.(block.name, argsJson)
         const part: GeminiPart = { functionCall: { name: block.name, args } }
-        if (signature !== undefined && signature !== '') part.thoughtSignature = signature
+        if (options.lookupSignature !== undefined && !signed) {
+          if (signature !== undefined && signature !== '') {
+            part.thoughtSignature = signature
+            signed = true
+          } else if (inCurrentTurn) {
+            part.thoughtSignature = GEMINI_SKIP_SIGNATURE
+            signed = true
+          }
+        }
         parts.push(part)
         continue
       }
@@ -451,12 +498,32 @@ export function translateGeminiResponse(
   const candidate = options.response.candidates?.[0]
   const blocks: ContentBlock[] = []
   let toolCalls = 0
+  /**
+   * 从**任意 part** 上看到的最近一个签名。
+   *
+   * ⚠️ 上游把签名挂在 `thought` part 上是**常见形态**，此时紧随其后的
+   * `functionCall` **本身不带签名** —— 只读 `part.thoughtSignature` 的
+   * `functionCall` 会漏掉它，缓存永远是空的，下一轮必然 400
+   * `Function call is missing a thought_signature`（真实报障，2026-10-21）。
+   * 故这里按「同一条 content 内最近的签名」回填给缺签名的 functionCall。
+   */
+  let pendingSignature: string | undefined
   for (const part of candidate?.content?.parts ?? []) {
+    if (typeof part.thoughtSignature === 'string' && part.thoughtSignature !== '') {
+      // 记下来：它可能属于后面那个 functionCall（上游把签名放在 thought part 上）。
+      pendingSignature = part.thoughtSignature
+    }
     if (part.functionCall !== undefined) {
       const args = part.functionCall.args ?? {}
       const argsJson = canonicalArgs(args)
-      if (typeof part.thoughtSignature === 'string' && part.thoughtSignature !== '') {
-        options.onSignature?.(part.functionCall.name, argsJson, part.thoughtSignature)
+      // 优先用该 part 自带的签名（并行调用的首个 FC 形态），否则用最近一个。
+      const signature =
+        typeof part.thoughtSignature === 'string' && part.thoughtSignature !== ''
+          ? part.thoughtSignature
+          : pendingSignature
+      if (signature !== undefined && signature !== '') {
+        options.onSignature?.(part.functionCall.name, argsJson, signature)
+        pendingSignature = undefined
       }
       blocks.push({
         type: 'tool-call',
@@ -592,6 +659,13 @@ export async function* consumeGeminiSse(
   let usage: Partial<TokenUsage> = {}
   let usageTotal = -1
   let toolCount = 0
+  /**
+   * 本帧/前几帧里见过、但还没归属给 `functionCall` 的签名。
+   *
+   * ⚠️ 上游常把签名挂在 `thought` part 上，而对应的 `functionCall` 可能是
+   * **下一帧**的内容 —— 故它必须跨帧保留，不能只在单个 part 上就地读。
+   */
+  let pendingSignature: string | undefined
 
   const closeBlock = function* (): Generator<StreamChunk> {
     if (block === undefined) return
@@ -650,11 +724,21 @@ export async function* consumeGeminiSse(
       finishReason = candidate.finishReason
     }
     for (const part of candidate.content?.parts ?? []) {
+      if (typeof part.thoughtSignature === 'string' && part.thoughtSignature !== '') {
+        // ⚠️ 记下来，**不要**只认 functionCall 上的那个：上游常把签名挂在
+        // `thought` part 上，紧随其后（甚至下一帧）的 `functionCall` 本身不带
+        // 签名。只读 functionCall 会让缓存永远是空的，下一轮必然 400
+        // `Function call is missing a thought_signature`（真实报障，2026-10-21）。
+        // 跨帧保留是必需的：thought part 与 functionCall 可能落在不同 SSE 帧。
+        pendingSignature = part.thoughtSignature
+      }
       if (part.functionCall !== undefined) {
         const args = part.functionCall.args ?? {}
         const argsJson = canonicalArgs(args)
-        if (typeof part.thoughtSignature === 'string' && part.thoughtSignature !== '') {
-          options.onSignature?.(part.functionCall.name, argsJson, part.thoughtSignature)
+        const signature = pendingSignature ?? part.thoughtSignature
+        if (signature !== undefined && signature !== '') {
+          options.onSignature?.(part.functionCall.name, argsJson, signature)
+          pendingSignature = undefined
         }
         // ⚠️ 工具调用**独占一个块**，参数一次性发完再关块（与其它 SSE 消费器同
         // `emitToolCall` 同口径）：上游的 functionCall 是完整的、不是增量。
@@ -682,9 +766,9 @@ export async function* consumeGeminiSse(
       if (typeof part.text !== 'string' || part.text === '') continue
 
       if (part.thought === true) {
-        // ⚠️ 思考分片上的签名**刻意不存**（原版 `CollectSignatures` 的口径）：
-        // Gemini 校验的只有 functionCall 上那一个，纯文本 part 的签名回传时
-        // 会被忽略 —— 存了纯属噪音，还会把缓存挤爆。
+        // ⚠️ 思考分片的**文本**不进历史（见文件头），但它的**签名要留下** ——
+        // 上游把签名挂在 thought part 上是常见形态，那个签名正是后面
+        // functionCall 需要回传的那一个（`pendingSignature` 在循环顶部已记）。
         if (block?.kind !== 'reasoning') yield* openBlock('reasoning')
         sawAnyChunk = true
         if (block !== undefined) {

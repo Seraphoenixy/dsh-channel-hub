@@ -464,26 +464,99 @@ var LedgerDatabase = class {
       }
       return [...out].map(([id, m]) => this.promote(id, m));
     };
+    const modelGroups = () => {
+      const out = /* @__PURE__ */ new Map();
+      for (const r of rows) {
+        const record = r;
+        const provider = String(record.provider);
+        const model = String(record.model);
+        const key = provider + "/" + model;
+        const previous = out.get(key);
+        out.set(key, {
+          ...add(previous ?? empty(), JSON.parse(String(record.metrics))),
+          provider
+        });
+      }
+      return [...out].map(([key, m]) => {
+        const { provider, ...metrics } = m;
+        return { ...this.promote(key, metrics), provider, model: key.slice(provider.length + 1) };
+      });
+    };
     return {
       totals: present(
         rows.reduce((m, r) => add(m, JSON.parse(String(r.metrics))), empty())
       ),
       counts: this.requestCounts(f),
       series: groups("day").sort((a, b) => a.id.localeCompare(b.id)),
-      models: groups("model"),
+      /**
+       * 每日 × 渠道的交叉统计（按本地自然日）。
+       *
+       * ⚠️ 原有的 `series` 只按日期分组，所有渠道混成一根柱子 —— 用户
+       * （2026-10-21）要求「每日消耗按来源分别统计」。这里额外给出交叉维度，
+       * 让界面画**按渠道分段的堆叠柱**，既能看当天总量，也能看各渠道占比。
+       *
+       * 结构：`{ day, provider, ...metrics }` 的扁平数组，**已按日期升序、
+       * 同日内按 Token 降序**排序 —— 排序放在宿主侧，保证柱段顺序稳定，
+       * 不因对象键序或查询顺序抖动。
+       */
+      dailyByProvider: (() => {
+        const bucket = /* @__PURE__ */ new Map();
+        for (const r of rows) {
+          const record = r;
+          const day = String(record.day);
+          const provider = String(record.provider);
+          const key = day + "\0" + provider;
+          const previous = bucket.get(key);
+          bucket.set(key, {
+            day,
+            provider,
+            metrics: add(
+              previous?.metrics ?? empty(),
+              JSON.parse(String(record.metrics))
+            )
+          });
+        }
+        return [...bucket.values()].map((entry) => ({
+          day: entry.day,
+          provider: entry.provider,
+          ...present(entry.metrics)
+        })).sort(
+          (a, b) => a.day.localeCompare(b.day) || (b.totalTokens ?? 0) - (a.totalTokens ?? 0) || a.provider.localeCompare(b.provider)
+        );
+      })(),
+      models: modelGroups(),
       providers: groups("provider"),
       accounts: this.accountStats(f)
     };
   }
+  /**
+   * 账号分组：键是 `provider/accountId`。
+   *
+   * ⚠️ `provider` 必须**单独回传**，不能只靠 `promote` 去猜：`promote` 用
+   * `identity:<provider>/<accountId>` 查显示名，查不到时把整串当名字，
+   * 界面就分不出「来源」与「账号」两段。返回结构化字段后，界面按
+   * 「来源 / 名称」渲染，两边都不必解析字符串。
+   */
   accountStats(f) {
     const { where, args } = this.dailyWhere(f, "per-account");
     const rows = this.db.prepare("SELECT provider, accountId, metrics FROM daily" + where).all(...args);
     const out = /* @__PURE__ */ new Map();
     for (const r of rows) {
-      const id = String(r.provider) + "/" + String(r.accountId);
-      out.set(id, add(out.get(id) ?? empty(), JSON.parse(String(r.metrics))));
+      const provider = String(r.provider);
+      const accountId = String(r.accountId);
+      const key = provider + "/" + accountId;
+      const previous = out.get(key);
+      out.set(key, {
+        metrics: add(previous?.metrics ?? empty(), JSON.parse(String(r.metrics))),
+        provider,
+        accountId
+      });
     }
-    return [...out].map(([id, m]) => this.promote(id, m));
+    return [...out].map(([key, entry]) => ({
+      ...this.promote(key, entry.metrics),
+      provider: entry.provider,
+      accountId: entry.accountId
+    }));
   }
   prune(now = Date.now()) {
     this.db.prepare("DELETE FROM requests WHERE started<? AND outcome<>'running'").run(now - 90 * 864e5);

@@ -32,6 +32,7 @@ import { RaccoonAdapter } from "../../vendor/ofm/src/raccoon-adapter.ts";
 import { RACCOON } from "../../vendor/ofm/src/raccoon-product.ts";
 import { GeminiAuth } from "../../vendor/ofm/src/gemini-auth.ts";
 import { GeminiAdapter } from "../../vendor/ofm/src/gemini-adapter.ts";
+import { createGeminiSigStore } from "../../vendor/ofm/src/gemini-sigstore.ts";
 import {
   GEMINI,
   GEMINI_ENDPOINTS,
@@ -236,6 +237,26 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
         await renewAccount(a);
       };
       const currentAccountId = () => observer.context.getStore()?.accountId;
+      /**
+       * Gemini 的 `thoughtSignature` 缓存。
+       *
+       * ⚠️ **必须每个渠道建一次并长期复用**（与 OFM 入口同口径）：它既是
+       * 跨请求缓存，也要在停止时 `flush()` 落盘。现造等于每轮都从空缓存开始 ——
+       * 上游会以
+       * `Function call is missing a thought_signature in functionCall parts`
+       * 400 拒绝（真实报障，2026-10-21）。
+       *
+       * 只有 Gemini 需要；其余渠道 `sigStore` 保持 `undefined`（适配器据此
+       * 不做任何签名回填）。
+       */
+      const sigStore = id === "gemini" ? createGeminiSigStore(ctx) : undefined;
+      /**
+       * Gemini 信封里的 `project`（跨启动缓存）。
+       *
+       * ⚠️ 与 OFM 入口同口径：`project` **不是**恒为兜底串，缺省由适配器现探
+       * `loadCodeAssist`。这里建一次、长期复用 —— 现造等于每轮都多打一次探测。
+       */
+      const projectCache = id === "gemini" ? new Map() : undefined;
       const options = {
         credentialRef: product.defaultCredentialRef,
         product,
@@ -259,6 +280,24 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
           return { accountId: s.entry.id, credential: s.credential };
         },
         isReady: async () => Boolean(await resolveCredential("")),
+        // 以下三项只有 Gemini 适配器读取；其余渠道忽略（`undefined`）。
+        ...(sigStore === undefined ? {} : { sigStore }),
+        ...(projectCache === undefined ? {} : { projectCache }),
+        // 现探到**非兜底**的真值才回写凭据（best-effort，失败不影响推理）。
+        // ⚠️ 回写对象必须是**本次解析凭据用的那个账号**，不是默认 ref ——
+        // 写错会把另一个账号的项目号污染掉。
+        ...(id !== "gemini"
+          ? {}
+          : {
+              persistProject: async (value) => {
+                const selected = await choose(id, "");
+                if (!selected) return;
+                await ctx.credentials.set(
+                  selected.entry.credentialRef,
+                  JSON.stringify({ ...selected.credential, cloudaicompanionProject: value }),
+                );
+              },
+            }),
       };
       let adapter = new Adapter(options);
       const discover = async (account) =>
@@ -504,6 +543,8 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
         claim,
         renew: renewAccount,
         discover,
+        // 停止时落盘签名缓存（`undefined` 的渠道直接跳过）。
+        flush: sigStore === undefined ? undefined : () => sigStore.flush(),
       });
     } catch (e) {
       drivers.set(id, { id, name, error: redact(e) });
@@ -632,6 +673,14 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
       for (const d of drivers.values()) {
         d.auth?.stop?.();
         if (typeof d.registration === "function") await d.registration();
+      }
+      // 签名缓存是**纯缓存**：落盘失败不该阻断插件停止（`flush` 内部已兜底）。
+      for (const d of drivers.values()) {
+        try {
+          await d.flush?.();
+        } catch {
+          /* 纯缓存，失败不影响停止 */
+        }
       }
     },
   };

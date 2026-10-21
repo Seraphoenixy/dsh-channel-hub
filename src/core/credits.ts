@@ -24,6 +24,9 @@
  *    「1 亿积分」（真实报障）；混单位时逐单位给读数，不给合计与进度。
  * 3. **面值未知不补 100%**：`total <= 0` 时不给进度条，只给「剩余 N」。
  *    补一个 100% 等于宣称一个自己并不知道的满额。
+ *    例外是**全零占位包**（`total`/`used`/`remaining` 全为 0，如 Qoder 免费档
+ *    的 `套餐额度`）：它既没有余额也没有用量，不构成「一个额度未知的包」，
+ *    因此不否决同账号里真正有面值的包（见 `summarize` 的 `informative`）。
  *
  * 另：失效包（`active === false`）的余额**不计入** `total`，单独汇总到
  * `expiredTotal` 供界面提示「另有 N 已失效」——服务端仍会返回那部分数字，
@@ -197,7 +200,19 @@ function summarize(
       ? { packages, packagesCount: packages.length }
       : {}),
   };
-  const units = [...new Set(active.map((pkg) => pkg.unit))];
+  // ⚠️ **全零占位包**（真实缺陷，2026-10-21 用户报障「Qoder 的两个卡片没
+  // 渲染使用额度进度条」）：Qoder 的 `userQuota`（`套餐额度`）在免费档下发
+  // `{ total: 0, used: 0, remaining: 0 }` —— 它既没有余额也没有用量，更没有
+  // 面值，是一条**空占位**。它若参与「面值未知」判定与单位分组，就会把同一
+  // 账号里真正有面值的 `资源包`（实测 `1,310 / 2,200`）的进度条一起撤掉，
+  // 卡片只剩「1,310积分」。空占位不构成「一个我们不知道额度的包」：它对
+  // remaining 与 capacity 都不贡献任何数字，故从合计里剔除（仍保留在
+  // `packages` 明细里如实展示）。有余额（超过 0）或有已用量的包**仍然**会
+  // 否决合计面值 —— 那些包的容量才是真的不知道，不能只对一部分包求和。
+  const informative = (pkg: CreditPackageView) =>
+    pkg.total > 0 || pkg.remaining > 0 || (pkg.used ?? 0) > 0;
+  const counted = active.filter(informative);
+  const units = [...new Set(counted.map((pkg) => pkg.unit))];
   // 混单位：逐单位给读数，**不给合计**（token 与积分不能相加）。
   if (units.length > 1) {
     // 顺序固定 token → 积分 → 其它：与 vendor `formatClaimGains` 同序，
@@ -206,7 +221,7 @@ function summarize(
     const parts = units
       .sort((a, b) => order.indexOf(a) - order.indexOf(b))
       .map((unit) => {
-        const sum = active
+        const sum = counted
           .filter((pkg) => pkg.unit === unit)
           .reduce((n, pkg) => n + pkg.remaining, 0);
         return formatUnitAmount(round(sum), unit);
@@ -214,12 +229,12 @@ function summarize(
     return { ...base, label: parts.join(" · "), note: "多个单位，不做合计" };
   }
   const unit: CreditUnit = units[0] ?? packages[0]?.unit ?? "credit";
-  const remaining = round(active.reduce((n, pkg) => n + pkg.remaining, 0));
-  const capacity = round(active.reduce((n, pkg) => n + pkg.total, 0));
-  // 合计面值只在**所有**有效包都声明了面值时才成立：若只对一部分包求和，
-  // 分母会小于真实剩余（进度还能超过 100%），等于报了一个自己并不知道的数。
-  // 任一包面值未知 ⇒ 整个读数按「面值未知」处理，只显示剩余、不画进度条。
-  const known = active.length > 0 && active.every((pkg) => pkg.total > 0);
+  const remaining = round(counted.reduce((n, pkg) => n + pkg.remaining, 0));
+  const capacity = round(counted.reduce((n, pkg) => n + pkg.total, 0));
+  // 合计面值只在**所有**参与合计的包都声明了面值时才成立：若只对一部分包
+  // 求和，分母会小于真实剩余（进度还能超过 100%），等于报了一个自己并不知道
+  // 的数。任一有余额/有用量的包面值未知 ⇒ 整个读数只显示剩余、不画进度条。
+  const known = counted.length > 0 && counted.every((pkg) => pkg.total > 0);
   const hint = numberOf(options.totalHint);
   const expiredTotal = round(
     options.expiredTotal !== undefined
@@ -240,17 +255,19 @@ function summarize(
       ...(expiredTotal > 0 ? { expiredTotal } : {}),
     };
   }
+  // 面值已知**且**分母为正才写 `剩余 / 总额`：全零包组成的账号没有可用的
+  // 分母，此时只写剩余，绝不拼出「0 / 0积分」或除零的进度。
+  const measured = known && capacity > 0;
   return {
     ...base,
     total: hint !== undefined && hint >= 0 ? round(hint) : remaining,
     unit,
-    // 面值已知才写 `剩余 / 总额`；否则只写剩余（不补一个假总额）。
-    label: known
+    label: measured
       ? formatCreditValue(remaining, unit) +
         " / " +
         formatUnitAmount(capacity, unit)
       : formatUnitAmount(remaining, unit),
-    ...(known ? { progress: clamp01(remaining / capacity) } : {}),
+    ...(measured ? { progress: clamp01(remaining / capacity) } : {}),
     ...(expiredTotal > 0 ? { expiredTotal } : {}),
     ...(active.length === 0 ? { note: "额度包均已失效" } : {}),
   };

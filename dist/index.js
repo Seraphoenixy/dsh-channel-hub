@@ -471,10 +471,10 @@ var init_login = __esm({
 });
 
 // src/index.ts
-import { existsSync as existsSync5 } from "node:fs";
-import { join as join6 } from "node:path";
+import { existsSync as existsSync6 } from "node:fs";
+import { join as join7 } from "node:path";
 import { homedir as homedir3 } from "node:os";
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 
 // src/reload.ts
@@ -892,10 +892,52 @@ var WorkerStore = class {
 
 // src/core/types.ts
 function redact(error) {
-  return String(error instanceof Error ? error.message : error).replace(/Bearer\s+[^\s"']+/gi, "Bearer [REDACTED]").replace(
+  const text3 = describeThrown(error).replace(/Bearer\s+[^\s"']+/gi, "Bearer [REDACTED]").replace(
     /((?:access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|cookie)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
     "$1[REDACTED]"
-  ).slice(0, 1600);
+  ).trim();
+  return (text3.length > 0 ? text3 : "\u672A\u77E5\u9519\u8BEF\uFF08\u629B\u51FA\u7269\u4E0D\u53EF\u8BFB\uFF09").slice(0, 1600);
+}
+function describeThrown(error) {
+  if (error instanceof Error) {
+    const message = error.message;
+    if (error.name === "AbortError")
+      return message.length > 0 ? "\u8BF7\u6C42\u5DF2\u53D6\u6D88\uFF1A" + message : "\u8BF7\u6C42\u5DF2\u53D6\u6D88";
+    if (error.name === "TimeoutError")
+      return message.length > 0 ? "\u8BF7\u6C42\u8D85\u65F6\uFF1A" + message : "\u8BF7\u6C42\u8D85\u65F6";
+    return message;
+  }
+  if (typeof error === "string") return error;
+  if (typeof error === "number" || typeof error === "boolean")
+    return String(error);
+  if (error === null || error === void 0) return "";
+  try {
+    const record = error;
+    for (const key of ["message", "msg", "error", "detail"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim().length > 0)
+        return value.trim();
+    }
+    for (const key of ["reason", "cause", "failure"]) {
+      const value = record[key];
+      if (value instanceof Error) return describeThrown(value);
+      if (typeof value === "string" && value.trim().length > 0)
+        return value.trim();
+      if (typeof value === "object" && value !== null) {
+        const nested = describeThrown(value);
+        if (nested.length > 0) return nested;
+      }
+    }
+    const json = JSON.stringify(error)?.replace(/\s+/g, " ").slice(0, 400) ?? "";
+    if (json.length > 0 && json !== "{}") return json;
+  } catch {
+  }
+  try {
+    const text3 = String(error);
+    return text3 === "[object Object]" ? "" : text3;
+  } catch {
+    return "";
+  }
 }
 function dayOf(ts) {
   return new Date(ts + 8 * 36e5).toISOString().slice(0, 10);
@@ -981,12 +1023,27 @@ var CatalogService = class {
 // src/core/observer.ts
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
+function cancelMessage(source, error) {
+  const original = redact(error);
+  if (source === "caller")
+    return original.length > 0 ? "\u8BF7\u6C42\u5DF2\u53D6\u6D88\uFF08\u7528\u6237\u505C\u6B62\uFF09\uFF1A" + original : "\u8BF7\u6C42\u5DF2\u53D6\u6D88\uFF08\u7528\u6237\u505C\u6B62\uFF09";
+  if (source === "plugin")
+    return original.length > 0 ? "\u63D2\u4EF6\u5DF2\u505C\u6B62\uFF0C\u672C\u6B21\u8BF7\u6C42\u4E2D\u65AD\uFF1A" + original : "\u63D2\u4EF6\u5DF2\u505C\u6B62\uFF0C\u672C\u6B21\u8BF7\u6C42\u4E2D\u65AD";
+  return original.length > 0 ? "\u8BF7\u6C42\u5DF2\u4E2D\u65AD\uFF1A" + original : "\u8BF7\u6C42\u5DF2\u4E2D\u65AD";
+}
 var Observer = class {
   constructor(store, logger) {
     this.store = store;
     this.logger = logger;
   }
   context = new AsyncLocalStorage();
+  /**
+   * 进行中的请求：controller → { 完成信号, 取消来源标记 }。
+   *
+   * ⚠️ 需要 markAbort 而不只是 promise：`close()` 必须能告诉每个请求
+   * "这次中断是插件停止造成的"，否则日志里只会留下宿主/Node 的英文原文
+   * （真实缺陷，2026-10-21）。
+   */
   active = /* @__PURE__ */ new Map();
   /** 会话 → 当前轮次 id（用于把同一条用户消息的多次调用归到一轮）。 */
   turns = /* @__PURE__ */ new Map();
@@ -1030,8 +1087,19 @@ var Observer = class {
   async *stream(provider, model, run, signal, meta) {
     const controller = new AbortController();
     const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+    let abortSource;
+    const markAbort = (source) => {
+      abortSource ??= source;
+      const current = this.context.getStore();
+      if (current !== void 0) current.abortSource ??= source;
+    };
+    const noteCallerAbort = () => {
+      markAbort("caller");
+    };
+    signal?.addEventListener("abort", noteCallerAbort, { once: true });
     let release;
-    this.active.set(controller, new Promise((r) => release = r));
+    const done = new Promise((r) => release = r);
+    this.active.set(controller, { done, markAbort });
     const req = {
       id: randomUUID(),
       provider,
@@ -1063,8 +1131,9 @@ var Observer = class {
       if (req.outcome === "running")
         req.outcome = combined.aborted ? "cancelled" : "success";
     } catch (e) {
-      req.outcome = combined.aborted ? "cancelled" : "failed";
-      req.error = redact(e);
+      const cancelled = abortSource !== void 0;
+      req.outcome = cancelled ? "cancelled" : "failed";
+      req.error = cancelled ? cancelMessage(abortSource, e) : redact(e);
       if (scope.current) {
         scope.current.outcome = req.outcome;
         scope.current.error = req.error;
@@ -1085,19 +1154,21 @@ var Observer = class {
       await this.write("finish", req, scope.attempts);
       this.active.delete(controller);
       release();
+      signal?.removeEventListener("abort", noteCallerAbort);
     }
   }
   async close() {
+    for (const [, entry] of this.active) entry.markAbort("plugin");
     const work = [...this.active.entries()];
     for (const [controller] of work) controller.abort();
-    await Promise.all(work.map(([, promise]) => promise));
+    await Promise.all(work.map(([, entry]) => entry.done));
   }
   isIdle() {
     return this.active.size === 0;
   }
   async whenIdle() {
     while (this.active.size)
-      await Promise.all([...this.active.values()]);
+      await Promise.all([...this.active.values()].map((entry) => entry.done));
   }
   observeChunk(s, chunk) {
     const a = s.current;
@@ -1251,8 +1322,11 @@ var Observer = class {
             }
           },
           cancel: async (reason) => {
-            await reader.cancel(reason);
-            await finish("cancelled");
+            const aborted = init?.signal?.aborted === true || this.context.getStore()?.abortSource !== void 0;
+            if (a.outcome === "running")
+              await finish(aborted ? "cancelled" : "success", aborted ? reason : void 0);
+            await reader.cancel(reason).catch(() => {
+            });
           }
         });
         return new Response(body, {
@@ -1456,19 +1530,21 @@ function summarize(packages, options = {}) {
     ...tags.length > 0 ? { tags } : {},
     ...packages.length > 0 ? { packages, packagesCount: packages.length } : {}
   };
-  const units = [...new Set(active.map((pkg) => pkg.unit))];
+  const informative = (pkg) => pkg.total > 0 || pkg.remaining > 0 || (pkg.used ?? 0) > 0;
+  const counted = active.filter(informative);
+  const units = [...new Set(counted.map((pkg) => pkg.unit))];
   if (units.length > 1) {
     const order = ["token", "credit", "percent", "usd"];
     const parts = units.sort((a, b) => order.indexOf(a) - order.indexOf(b)).map((unit2) => {
-      const sum = active.filter((pkg) => pkg.unit === unit2).reduce((n, pkg) => n + pkg.remaining, 0);
+      const sum = counted.filter((pkg) => pkg.unit === unit2).reduce((n, pkg) => n + pkg.remaining, 0);
       return formatUnitAmount(round(sum), unit2);
     });
     return { ...base, label: parts.join(" \xB7 "), note: "\u591A\u4E2A\u5355\u4F4D\uFF0C\u4E0D\u505A\u5408\u8BA1" };
   }
   const unit = units[0] ?? packages[0]?.unit ?? "credit";
-  const remaining = round(active.reduce((n, pkg) => n + pkg.remaining, 0));
-  const capacity = round(active.reduce((n, pkg) => n + pkg.total, 0));
-  const known = active.length > 0 && active.every((pkg) => pkg.total > 0);
+  const remaining = round(counted.reduce((n, pkg) => n + pkg.remaining, 0));
+  const capacity = round(counted.reduce((n, pkg) => n + pkg.total, 0));
+  const known = counted.length > 0 && counted.every((pkg) => pkg.total > 0);
   const hint = numberOf(options.totalHint);
   const expiredTotal = round(
     options.expiredTotal !== void 0 ? Math.max(0, options.expiredTotal) : packages.filter((pkg) => !pkg.active).reduce((n, pkg) => n + Math.max(0, pkg.remaining), 0)
@@ -1481,13 +1557,13 @@ function summarize(packages, options = {}) {
       ...expiredTotal > 0 ? { expiredTotal } : {}
     };
   }
+  const measured = known && capacity > 0;
   return {
     ...base,
     total: hint !== void 0 && hint >= 0 ? round(hint) : remaining,
     unit,
-    // 面值已知才写 `剩余 / 总额`；否则只写剩余（不补一个假总额）。
-    label: known ? formatCreditValue(remaining, unit) + " / " + formatUnitAmount(capacity, unit) : formatUnitAmount(remaining, unit),
-    ...known ? { progress: clamp01(remaining / capacity) } : {},
+    label: measured ? formatCreditValue(remaining, unit) + " / " + formatUnitAmount(capacity, unit) : formatUnitAmount(remaining, unit),
+    ...measured ? { progress: clamp01(remaining / capacity) } : {},
     ...expiredTotal > 0 ? { expiredTotal } : {},
     ...active.length === 0 ? { note: "\u989D\u5EA6\u5305\u5747\u5DF2\u5931\u6548" } : {}
   };
@@ -20264,6 +20340,7 @@ var GEMINI_BUDGET_MEDIUM = 4e3;
 var GEMINI_BUDGET_HIGH = 1e4;
 var GEMINI_BUDGET_TIERED = -1;
 var GEMINI_CONTEXT_WINDOW = 1e6;
+var GEMINI_SKIP_SIGNATURE = "skip_thought_signature_validator";
 var GEMINI_EFFORT_IDS = ["low", "medium", "high", "tiered"];
 var GEMINI_DEFAULT_EFFORT = "medium";
 function geminiEffortLabel(id) {
@@ -21091,11 +21168,24 @@ function translateGeminiRequest(options) {
       if (block.type === "tool-call") toolNames.set(String(block.id), block.name);
     }
   }
+  const turnStart = (() => {
+    for (let index = normalized.length - 1; index >= 0; index--) {
+      const message = normalized[index];
+      if (message.role !== "user") continue;
+      const standard = message.content.some(
+        (block) => block.type === "text" && block.text !== "" || block.type === "image"
+      );
+      if (standard) return index;
+    }
+    return 0;
+  })();
   const contents = [];
-  for (const message of normalized) {
+  for (const [messageIndex, message] of normalized.entries()) {
     if (message.role === "system") continue;
     const role = message.role === "assistant" ? "model" : "user";
     const parts = [];
+    let signed = false;
+    const inCurrentTurn = messageIndex >= turnStart;
     for (const block of message.content) {
       if (block.type === "tool-call") {
         if (!keepCallIds.has(String(block.id))) continue;
@@ -21103,7 +21193,15 @@ function translateGeminiRequest(options) {
         const argsJson = canonicalArgs(args);
         const signature = options.lookupSignature?.(block.name, argsJson);
         const part = { functionCall: { name: block.name, args } };
-        if (signature !== void 0 && signature !== "") part.thoughtSignature = signature;
+        if (options.lookupSignature !== void 0 && !signed) {
+          if (signature !== void 0 && signature !== "") {
+            part.thoughtSignature = signature;
+            signed = true;
+          } else if (inCurrentTurn) {
+            part.thoughtSignature = GEMINI_SKIP_SIGNATURE;
+            signed = true;
+          }
+        }
         parts.push(part);
         continue;
       }
@@ -21291,6 +21389,7 @@ async function* consumeGeminiSse(options) {
   let usage = {};
   let usageTotal = -1;
   let toolCount = 0;
+  let pendingSignature;
   const closeBlock = function* () {
     if (block === void 0) return;
     let content;
@@ -21339,11 +21438,16 @@ async function* consumeGeminiSse(options) {
       finishReason = candidate.finishReason;
     }
     for (const part of candidate.content?.parts ?? []) {
+      if (typeof part.thoughtSignature === "string" && part.thoughtSignature !== "") {
+        pendingSignature = part.thoughtSignature;
+      }
       if (part.functionCall !== void 0) {
         const args = part.functionCall.args ?? {};
         const argsJson = canonicalArgs(args);
-        if (typeof part.thoughtSignature === "string" && part.thoughtSignature !== "") {
-          options.onSignature?.(part.functionCall.name, argsJson, part.thoughtSignature);
+        const signature = pendingSignature ?? part.thoughtSignature;
+        if (signature !== void 0 && signature !== "") {
+          options.onSignature?.(part.functionCall.name, argsJson, signature);
+          pendingSignature = void 0;
         }
         yield* openBlock("tool-call");
         if (block !== void 0) {
@@ -21775,10 +21879,13 @@ var GeminiAdapter = class extends LlmAdapter8 {
           project,
           requestId: newGeminiRequestId(),
           ...images === void 0 ? {} : { images },
-          ...droppedSignatures || sigStore === void 0 ? {} : {
-            lookupSignature: (name2, argsJson) => {
-              return sigStore.get(name2, argsJson) ?? sigStore.latestForTool(name2);
-            }
+          // ⚠️ **始终**提供查表回调（哪怕 `sigStore` 缺失）：上游强制要求本轮
+          // 每个 step 的首个 `functionCall` 带 `thoughtSignature`，缺失即 400。
+          // 查不到真签名时信封层会填 {@link GEMINI_SKIP_SIGNATURE}（上游文档
+          // 明示的跳过校验哨兵），而不是干脆不带签名 —— 后者等于必然失败。
+          lookupSignature: (name2, argsJson) => {
+            if (droppedSignatures || sigStore === void 0) return "";
+            return sigStore.get(name2, argsJson) ?? sigStore.latestForTool(name2) ?? "";
           }
         });
         const url = `${GEMINI_ENDPOINTS[endpointIdx] ?? GEMINI_ENDPOINTS[0]}${GEMINI_STREAM_PATH}`;
@@ -21917,6 +22024,159 @@ var GeminiAdapter = class extends LlmAdapter8 {
   }
 };
 
+// vendor/ofm/src/gemini-sigstore.ts
+import { createHash as createHash7 } from "node:crypto";
+import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync5, renameSync as renameSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname2, join as join4 } from "node:path";
+var GEMINI_SIG_FILE = "gemini-sigs.json";
+var GEMINI_SIG_MAX_ENTRIES = 2e3;
+var SIG_KEY_BODY_LIMIT = 512;
+function geminiSigKey(role, text3) {
+  const body = text3.length > SIG_KEY_BODY_LIMIT ? text3.slice(0, SIG_KEY_BODY_LIMIT) : text3;
+  return createHash7("sha256").update(`${role}\0${body}`, "utf8").digest("hex").slice(0, 16);
+}
+function geminiToolSigKey(name2, argsJson) {
+  return geminiSigKey(`tool:${name2}`, argsJson);
+}
+function trimGeminiSignature(signature) {
+  return signature.trim();
+}
+var GeminiSigStore = class {
+  constructor(path, logger) {
+    this.path = path;
+    this.logger = logger;
+    this.entries = this.load();
+  }
+  entries;
+  dirty = false;
+  /** 当前条目数（诊断用）。 */
+  get size() {
+    return this.entries.size;
+  }
+  /** 按工具名 + 规范化参数查签名。 */
+  get(name2, argsJson) {
+    const entry = this.entries.get(geminiToolSigKey(name2, argsJson));
+    if (entry === void 0 || entry.sig === "") return void 0;
+    return entry.sig;
+  }
+  /**
+   * 按**工具名**取最近一次签名（精确键 miss 时的兜底）。
+   *
+   * ## 为什么需要它
+   *
+   * 精确键 = `sha256("tool:"+name+"\0"+args)[:16]`，**参数逐字相同**才命中。
+   * 但长任务里参数漂移是**必然事件**：绝对路径变了、时间戳变了、上游对参数做过
+   * 一次归一化、或用户改了同一个文件的行号。一旦漂移就 miss，只能走去签重试
+   * —— 而那条路会把**整条思考链丢掉**（模型重复思考、工具调用质量下降）。
+   *
+   * 兜底取值在语义上成立：签名绑定的是「模型对这次工具调用的推理」，同一个工具
+   * 名 + 近似参数下，最近一次签名是**最好可得**的近似，比没有强得多。
+   * 这正是 `cmdc-pak` 的 `Service.lookup` 做法（精确键 → 按工具名取最近）。
+   *
+   * ⚠️ 「最近」用**写入顺序**判定（Map 保插入序，同键 `set` 会覆盖并挪到末尾），
+   * **不**用 `at` 时间戳 —— 后者是**秒级**精度，同一秒内的两次写入无法区分，
+   * 会让兜底取到较早那个（实测踩过）。
+   *
+   * ⚠️ 返回 `undefined` 而不是抛错：拿不到签名就让上层走去签重试，那是既有路径。
+   */
+  latestForTool(name2) {
+    let best;
+    for (const entry of this.entries.values()) {
+      if (entry.name === name2 && entry.sig !== "") best = entry.sig;
+    }
+    return best;
+  }
+  /**
+   * 记一个签名。
+   *
+   * ⚠️ 空键/空签名一律丢弃（原版同口径）：上游偶尔下发空串占位，
+   * 存进去会让回填侧以为「有签名」而发一个空字段。
+   */
+  put(name2, argsJson, signature) {
+    const sig = trimGeminiSignature(signature);
+    if (sig === "") return;
+    const key = geminiToolSigKey(name2, argsJson);
+    if (key === "") return;
+    this.entries.set(key, { sig, at: Math.floor(Date.now() / 1e3), name: name2 });
+    if (this.entries.size > GEMINI_SIG_MAX_ENTRIES) this.evict();
+    this.dirty = true;
+  }
+  /**
+   * 淘汰最旧的一半。
+   *
+   * 原版用部分选择排序（冒泡一半）只为「少留一点空间」，不做精确 LRU；
+   * 这里直接全排序取后一半 —— **结果等价**（删掉最旧的一半），可读性更好。
+   */
+  evict() {
+    const all = [...this.entries.entries()].sort((a, b) => a[1].at - b[1].at);
+    const half = Math.floor(all.length / 2);
+    for (let i = 0; i < half; i++) {
+      const key = all[i]?.[0];
+      if (key !== void 0) this.entries.delete(key);
+    }
+  }
+  /**
+   * 写回磁盘（原子写：tmp + rename）。
+   *
+   * ⚠️ 纯缓存，**任何失败都只记日志**：写不进去只是命中率低一点，
+   * 不该让推理请求失败。
+   */
+  async flush() {
+    if (this.path === void 0 || !this.dirty) return;
+    this.dirty = false;
+    const payload = JSON.stringify(
+      Object.fromEntries(
+        [...this.entries.entries()].map(([key, entry]) => [
+          key,
+          // `name` 缺席时不写这个键（旧条目/未知来源），保持载荷紧凑。
+          entry.name === void 0 ? { sig: entry.sig, at: entry.at } : { sig: entry.sig, at: entry.at, name: entry.name }
+        ])
+      ),
+      null,
+      2
+    );
+    try {
+      mkdirSync4(dirname2(this.path), { recursive: true });
+      const tmp = `${this.path}.tmp`;
+      writeFileSync4(tmp, payload, "utf-8");
+      renameSync4(tmp, this.path);
+    } catch (error) {
+      this.logger?.warn(`[gemini] \u7B7E\u540D\u7F13\u5B58\u5199\u5165\u5931\u8D25\uFF08\u4E0D\u5F71\u54CD\u63A8\u7406\uFF09: ${String(error)}`);
+    }
+  }
+  /** 载入；文件不存在/损坏都按空缓存处理（**不抛错**）。 */
+  load() {
+    const out = /* @__PURE__ */ new Map();
+    if (this.path === void 0) return out;
+    try {
+      if (!existsSync4(this.path)) return out;
+      const parsed = JSON.parse(readFileSync5(this.path, "utf-8"));
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return out;
+      for (const [key, value] of Object.entries(parsed)) {
+        if (typeof value !== "object" || value === null) continue;
+        const record = value;
+        const sig = typeof record.sig === "string" ? record.sig : "";
+        if (sig === "") continue;
+        const at = typeof record.at === "number" && Number.isFinite(record.at) ? record.at : 0;
+        const name2 = typeof record.name === "string" && record.name !== "" ? record.name : void 0;
+        out.set(key, name2 === void 0 ? { sig, at } : { sig, at, name: name2 });
+      }
+    } catch (error) {
+      this.logger?.warn(`[gemini] \u7B7E\u540D\u7F13\u5B58\u6587\u4EF6\u635F\u574F\uFF0C\u5DF2\u91CD\u7F6E: ${String(error)}`);
+      return /* @__PURE__ */ new Map();
+    }
+    return out;
+  }
+};
+function createGeminiSigStore(ctx) {
+  const home = resolveChannelPackHome(ctx);
+  if (home === void 0) {
+    ctx.logger?.warn?.("[gemini] \u65E0\u6CD5\u5B9A\u4F4D DSH home\uFF0C\u7B7E\u540D\u7F13\u5B58\u4EC5\u5B58\u5728\u4E8E\u5185\u5B58\u4E2D\uFF08\u547D\u4E2D\u7387\u4F1A\u5728\u91CD\u542F\u540E\u5F52\u96F6\uFF09");
+    return new GeminiSigStore(void 0, ctx.logger);
+  }
+  return new GeminiSigStore(join4(home, "channel-pack", GEMINI_SIG_FILE), ctx.logger);
+}
+
 // src/drivers/gemini-catalog.ts
 function parseGeminiCatalog(body, supportedId) {
   if (!body?.models || typeof body.models !== "object" || Array.isArray(body.models))
@@ -21988,11 +22248,11 @@ async function syncQoderAccountName(options) {
 }
 
 // vendor/connect/cosy.js
-import { createCipheriv as createCipheriv2, createHash as createHash7, publicEncrypt, randomUUID as randomUUID8 } from "node:crypto";
-import { readFileSync as readFileSync5, writeFileSync as writeFileSync4, mkdirSync as mkdirSync4 } from "node:fs";
+import { createCipheriv as createCipheriv2, createHash as createHash8, publicEncrypt, randomUUID as randomUUID8 } from "node:crypto";
+import { readFileSync as readFileSync6, writeFileSync as writeFileSync5, mkdirSync as mkdirSync5 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname as dirname2, join as join4 } from "node:path";
-var resolveDshHome = () => process.env.DSH_HOME ?? join4(homedir(), ".dsh");
+import { dirname as dirname3, join as join5 } from "node:path";
+var resolveDshHome = () => process.env.DSH_HOME ?? join5(homedir(), ".dsh");
 var QODER_RSA_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
 4k6Pz1EaDicBMpdpxKduSZu5OANqUq8er4GM95omAGIOPOh+Nx0spthYA2BqGz+l
@@ -22008,7 +22268,7 @@ var ENC_TABLE = new Uint8Array(256);
 for (let i = 0; i < 256; i += 1) ENC_TABLE[i] = i;
 for (let i = 0; i < 64; i += 1) ENC_TABLE[STD_ALPHABET.charCodeAt(i)] = CUSTOM_ALPHABET.charCodeAt(i);
 ENC_TABLE["=".charCodeAt(0)] = "$".charCodeAt(0);
-var md5 = (bytes) => createHash7("md5").update(bytes).digest("hex");
+var md5 = (bytes) => createHash8("md5").update(bytes).digest("hex");
 function sigPathOf(url) {
   const p = new URL(url).pathname;
   return p.startsWith("/algo") ? p.slice("/algo".length) : p;
@@ -22016,26 +22276,26 @@ function sigPathOf(url) {
 function resolveMachineId() {
   const candidates = [
     process.env.QODERCN_MACHINE_ID,
-    join4(homedir(), ".qoder-cn", ".auth", "machine_id"),
-    join4(homedir(), ".qoder", ".auth", "machine_id")
+    join5(homedir(), ".qoder-cn", ".auth", "machine_id"),
+    join5(homedir(), ".qoder", ".auth", "machine_id")
   ].filter((p) => typeof p === "string" && p.length > 0);
   for (const path of candidates) {
     try {
-      const value = readFileSync5(path, "utf8").trim();
+      const value = readFileSync6(path, "utf8").trim();
       if (value.length > 0) return value;
     } catch {
     }
   }
-  const fallback = join4(resolveDshHome(), "qoder", "machine-id");
+  const fallback = join5(resolveDshHome(), "qoder", "machine-id");
   try {
-    const value = readFileSync5(fallback, "utf8").trim();
+    const value = readFileSync6(fallback, "utf8").trim();
     if (value.length > 0) return value;
   } catch {
   }
   const generated = randomUUID8();
   try {
-    mkdirSync4(dirname2(fallback), { recursive: true });
-    writeFileSync4(fallback, `${generated}
+    mkdirSync5(dirname3(fallback), { recursive: true });
+    writeFileSync5(fallback, `${generated}
 `, { mode: 384 });
   } catch {
   }
@@ -22077,7 +22337,7 @@ function buildCosyHeaders(body, requestUrl, creds) {
     ideVersion: ""
   })).toString("base64");
   const bodyBytes = body === void 0 || body === null ? Buffer.alloc(0) : Buffer.isBuffer(body) ? body : Buffer.from(body);
-  const sig = createHash7("md5").update(payloadB64).update("\n").update(cosyKey).update("\n").update(ts).update("\n").update(bodyBytes).update("\n").update(sigPathOf(requestUrl)).digest("hex");
+  const sig = createHash8("md5").update(payloadB64).update("\n").update(cosyKey).update("\n").update(ts).update("\n").update(bodyBytes).update("\n").update(sigPathOf(requestUrl)).digest("hex");
   const machineId = creds.machineID ?? resolveMachineId();
   return {
     Authorization: `Bearer COSY.${payloadB64}.${sig}`,
@@ -22531,9 +22791,9 @@ function roundCredits2(value) {
 
 // vendor/ofm/src/qoder-machine.ts
 import { execFileSync, spawn as spawn3 } from "node:child_process";
-import { existsSync as existsSync4, readFileSync as readFileSync6, readdirSync } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync7, readdirSync } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 var RUNTIME_INFO_TIMEOUT_MS = 2e4;
 var cached;
 function candidatePaths() {
@@ -22543,20 +22803,20 @@ function candidatePaths() {
   const appData = process.env.APPDATA;
   if (appData !== void 0 && appData.length > 0) {
     for (const dir of ["Qoder", "Qoder CN"]) {
-      paths.push(join5(appData, dir, "SharedClientCache", "cache", "machine_token.json"));
+      paths.push(join6(appData, dir, "SharedClientCache", "cache", "machine_token.json"));
     }
   }
   const home = homedir2();
   for (const dir of ["Qoder", "Qoder CN"]) {
-    paths.push(join5(home, "Library", "Application Support", dir, "SharedClientCache", "cache", "machine_token.json"));
-    paths.push(join5(home, ".config", dir, "SharedClientCache", "cache", "machine_token.json"));
+    paths.push(join6(home, "Library", "Application Support", dir, "SharedClientCache", "cache", "machine_token.json"));
+    paths.push(join6(home, ".config", dir, "SharedClientCache", "cache", "machine_token.json"));
   }
   return paths;
 }
 function parseFile(path) {
   let raw;
   try {
-    raw = readFileSync6(path, "utf8");
+    raw = readFileSync7(path, "utf8");
   } catch {
     return void 0;
   }
@@ -22595,7 +22855,7 @@ var QODER_DATA_DIR_NAMES = [".qoder", ".qoder-cn"];
 function findRuntimeInfoExecutable(home, dataDirNames = QODER_DATA_DIR_NAMES) {
   const exeName = process.platform === "win32" ? "runtime-info.exe" : "runtime-info";
   for (const dirName of dataDirNames) {
-    const binDir = join5(home, dirName, ".bin");
+    const binDir = join6(home, dirName, ".bin");
     let entries;
     try {
       entries = readdirSync(binDir);
@@ -22604,8 +22864,8 @@ function findRuntimeInfoExecutable(home, dataDirNames = QODER_DATA_DIR_NAMES) {
     }
     const dir = entries.find((name2) => name2.startsWith("umid-"));
     if (dir === void 0) continue;
-    const exe = join5(binDir, dir, exeName);
-    if (existsSync4(exe)) return exe;
+    const exe = join6(binDir, dir, exeName);
+    if (existsSync5(exe)) return exe;
   }
   return void 0;
 }
@@ -22613,7 +22873,7 @@ function locateRuntimeInfo(override) {
   const fromEnv = process.env.QODER_RUNTIME_INFO;
   const candidate = override ?? (fromEnv !== void 0 && fromEnv.length > 0 ? fromEnv : void 0);
   if (candidate !== void 0) {
-    return existsSync4(candidate) ? candidate : void 0;
+    return existsSync5(candidate) ? candidate : void 0;
   }
   return findRuntimeInfoExecutable(homedir2());
 }
@@ -23336,7 +23596,9 @@ async function fetchLobsteraiCreditBalance(credential, product, fetcher = fetch)
     }
   }
   const total = roundCredits3(Math.max(0, readNumber8(envelope.data, "totalCreditsRemaining")));
-  if (total === 0 && packages.length === 0) return null;
+  const rawTotal = envelope.data.totalCreditsRemaining;
+  const hasTotal = typeof rawTotal === "number" && Number.isFinite(rawTotal) || typeof rawTotal === "string" && /^-?\d+(\.\d+)?$/.test(rawTotal.trim());
+  if (!hasTotal && packages.length === 0) return null;
   const expiredTotal = roundCredits3(
     packages.reduce((sum, pkg) => sum + (pkg.active ? 0 : Math.max(0, pkg.remaining)), 0)
   );
@@ -23682,6 +23944,8 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         await renewAccount(a);
       };
       const currentAccountId = () => observer.context.getStore()?.accountId;
+      const sigStore = id === "gemini" ? createGeminiSigStore(ctx) : void 0;
+      const projectCache = id === "gemini" ? /* @__PURE__ */ new Map() : void 0;
       const options = {
         credentialRef: product.defaultCredentialRef,
         product,
@@ -23704,7 +23968,23 @@ async function createDrivers(ctx, { catalog, observer, store }) {
           observer.bindAccount(s.entry.id, s.entry.nickname);
           return { accountId: s.entry.id, credential: s.credential };
         },
-        isReady: async () => Boolean(await resolveCredential(""))
+        isReady: async () => Boolean(await resolveCredential("")),
+        // 以下三项只有 Gemini 适配器读取；其余渠道忽略（`undefined`）。
+        ...sigStore === void 0 ? {} : { sigStore },
+        ...projectCache === void 0 ? {} : { projectCache },
+        // 现探到**非兜底**的真值才回写凭据（best-effort，失败不影响推理）。
+        // ⚠️ 回写对象必须是**本次解析凭据用的那个账号**，不是默认 ref ——
+        // 写错会把另一个账号的项目号污染掉。
+        ...id !== "gemini" ? {} : {
+          persistProject: async (value) => {
+            const selected = await choose(id, "");
+            if (!selected) return;
+            await ctx.credentials.set(
+              selected.entry.credentialRef,
+              JSON.stringify({ ...selected.credential, cloudaicompanionProject: value })
+            );
+          }
+        }
       };
       let adapter = new Adapter(options);
       const discover = async (account) => directoryContext.run({}, async () => {
@@ -23920,7 +24200,9 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         balance,
         claim,
         renew: renewAccount,
-        discover
+        discover,
+        // 停止时落盘签名缓存（`undefined` 的渠道直接跳过）。
+        flush: sigStore === void 0 ? void 0 : () => sigStore.flush()
       });
     } catch (e) {
       drivers.set(id, { id, name: name2, error: redact(e) });
@@ -24036,6 +24318,12 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         d.auth?.stop?.();
         if (typeof d.registration === "function") await d.registration();
       }
+      for (const d of drivers.values()) {
+        try {
+          await d.flush?.();
+        } catch {
+        }
+      }
     }
   };
 }
@@ -24045,11 +24333,11 @@ var name = "channel-hub";
 var inject = ["llm", "credentials"];
 async function apply(ctx) {
   const profile = ctx.get?.("profileContext") ?? {};
-  const home = process.env.DSH_HOME ?? join6(homedir3(), ".dsh");
+  const home = process.env.DSH_HOME ?? join7(homedir3(), ".dsh");
   const profileName = profile.name ?? process.env.DSH_PROFILE ?? "desktop";
   if (!/^[\w.-]+$/.test(profileName)) throw Error("Invalid DSH profile name");
-  const data = join6(home, "profiles", profileName, "channel-hub");
-  const namespace = "CHANNEL_HUB_" + createHash8("sha256").update(data).digest("hex").slice(0, 12) + "_";
+  const data = join7(home, "profiles", profileName, "channel-hub");
+  const namespace = "CHANNEL_HUB_" + createHash9("sha256").update(data).digest("hex").slice(0, 12) + "_";
   const credentials = new Proxy(ctx.credentials, {
     get(target, key) {
       if (["resolve", "set", "delete", "remove"].includes(String(key)))
@@ -24065,7 +24353,7 @@ async function apply(ctx) {
       return Reflect.get(t, k, t);
     }
   });
-  const store = new WorkerStore(join6(data, "ledger.sqlite"));
+  const store = new WorkerStore(join7(data, "ledger.sqlite"));
   await store.ready;
   await store.call("prune");
   const catalog = new CatalogService(store);
@@ -24328,8 +24616,8 @@ async function apply(ctx) {
   else mount();
   let stopWatch;
   const packageDir = fileURLToPath3(new URL("../", import.meta.url));
-  if (process.env.CHANNEL_HUB_HOT_RELOAD !== "0" && existsSync5(join6(packageDir, "src", "index.ts"))) {
-    const distDir = join6(packageDir, "dist");
+  if (process.env.CHANNEL_HUB_HOT_RELOAD !== "0" && existsSync6(join7(packageDir, "src", "index.ts"))) {
+    const distDir = join7(packageDir, "dist");
     let reloadQueued = false;
     const reloadFromDisk = () => {
       if (stopped) return;

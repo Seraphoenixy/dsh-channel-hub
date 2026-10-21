@@ -420,6 +420,32 @@ export const GEMINI_BUDGET_TIERED = -1
 /** 上下文窗口（用户拍板填 1_000_000）。 */
 export const GEMINI_CONTEXT_WINDOW = 1_000_000
 
+/**
+ * 「跳过签名校验」的哨兵值（上游文档明示的最后手段）。
+ *
+ * ## 为什么需要它
+ *
+ * Gemini 3/4 **强制**校验**当前轮每个 step 的首个 `functionCall`** 上的
+ * `thoughtSignature`：缺失即 400
+ * `Function call is missing a thought_signature in functionCall parts`
+ * （真实报障，2026-10-21）。
+ *
+ * 而签名**只在响应里出现一次**，DSH 的思考块（`ReasoningBlock{type,text}`）
+ * 又不携带它 —— 签名只能靠 `gemini-sigstore.ts` 的落盘缓存兜住。缓存未命中是
+ * **必然会发生**的：首次见到某个工具、换进程后缓存未落盘、历史来自别的模型、
+ * 参数漂移超出 `latestForTool` 的兜底范围。这些情况下若干脆不带签名，整轮
+ * 工具循环直接报废。
+ *
+ * 上游为此留了显式逃生门（`generateContent` 文档 FAQ）：把 `thoughtSignature`
+ * 填成 `skip_thought_signature_validator` 即跳过校验。
+ * ⚠️ 文档同时说明它是**最后手段**（会降低模型表现）—— 故只在真签名不可得时
+ * 才用，绝不替代正常回填。
+ *
+ * ⚠️ 取值是文档里的**字面串**。有的代理实现发它的 base64，但文档逐字给出的
+ * 是这个串，能通过校验的是它。
+ */
+export const GEMINI_SKIP_SIGNATURE = 'skip_thought_signature_validator'
+
 /** 一个可选档位的 id（与 `reasoningEffort` 同域）。 */
 export const GEMINI_EFFORT_IDS: readonly string[] = ['low', 'medium', 'high', 'tiered']
 /** 默认档位。 */

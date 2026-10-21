@@ -28,6 +28,10 @@ await build({
   platform: "browser",
   format: "iife",
   target: "es2022",
+  // 样式以**字符串**内联（见 src/assets.d.ts 的说明）：若交给 esbuild 默认
+  // 的 CSS 处理，`import css from "./client.css"` 会被抽成独立样式资源、
+  // 默认导出一个空对象，页面就变成无样式。`text` loader 保证拿到原文。
+  loader: { ".css": "text" },
 });
 
 await copyFile(

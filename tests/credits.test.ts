@@ -264,6 +264,106 @@ test("a partially-known face value never becomes the denominator", () => {
   assert.equal(reading.progress, undefined);
 });
 
+test("an all-zero placeholder package does not veto a known face value (Qoder)", () => {
+  // 真实快照形状（2026-10-21，Qoder 国区）：`套餐额度` 是服务端下发的全零
+  // 占位包（免费档没有套餐额度），`资源包` 才带面值。占位包若参与「面值未知」
+  // 判定，卡片就只剩「1,310积分」而丢掉进度条 —— 用户报障的正是这一点。
+  const reading = creditReading({
+    at: 30,
+    value: {
+      total: 1310,
+      expiredTotal: 0,
+      packages: [
+        {
+          name: "套餐额度",
+          unit: "credits",
+          remaining: 0,
+          total: 0,
+          used: 0,
+          active: true,
+          cycleStartTime: "",
+          cycleEndTime: "",
+          expiredTime: "",
+        },
+        {
+          name: "资源包",
+          unit: "credits",
+          remaining: 1310,
+          total: 2200,
+          used: 890,
+          active: true,
+          cycleStartTime: "",
+          cycleEndTime: "",
+          expiredTime: "",
+        },
+      ],
+    },
+  });
+  assert.ok(reading);
+  assert.equal(reading.label, "1,310 / 2,200积分");
+  assert.equal(reading.progress, 1310 / 2200);
+  // 占位包照常列在明细里（如实展示），但自己不带进度 —— 它没有可画的占比。
+  assert.equal(reading.packages?.[0].label, "0积分");
+  assert.equal(reading.packages?.[0].progress, undefined);
+  assert.equal(reading.packages?.[1].progress, 1310 / 2200);
+});
+
+test("placeholder packages alone never become a 0 / 0 reading", () => {
+  const reading = creditReading({
+    at: 31,
+    value: {
+      total: 0,
+      expiredTotal: 0,
+      packages: [
+        {
+          name: "套餐额度",
+          unit: "credits",
+          remaining: 0,
+          total: 0,
+          used: 0,
+          active: true,
+        },
+      ],
+    },
+  });
+  assert.ok(reading);
+  // 没有可用的分母：只写剩余，不拼「0 / 0积分」、不除零。
+  assert.equal(reading.label, "0积分");
+  assert.equal(reading.progress, undefined);
+});
+
+test("a package with usage but no face value still vetoes the percentage", () => {
+  // 与全零占位包的区别：它**报告了用量**（剩余 0、面值未知），容量是真的
+  // 不知道 —— 这时按「面值未知」处理，不给合计百分比。
+  const reading = creditReading({
+    at: 32,
+    value: {
+      total: 400,
+      expiredTotal: 0,
+      packages: [
+        {
+          name: "本月套餐",
+          unit: "credits",
+          remaining: 0,
+          total: 0,
+          used: 500,
+          active: true,
+        },
+        {
+          name: "资源包",
+          unit: "credits",
+          remaining: 400,
+          total: 400,
+          active: true,
+        },
+      ],
+    },
+  });
+  assert.ok(reading);
+  assert.equal(reading.label, "400积分");
+  assert.equal(reading.progress, undefined);
+});
+
 test("display formatting matches the vendor conventions", () => {
   // 积分不压缩：用户要能与官方界面核对。
   assert.equal(formatCreditAmount(123456.78), "123,456.78");

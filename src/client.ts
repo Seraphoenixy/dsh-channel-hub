@@ -1,4 +1,5 @@
 import { rateLabel, promotionNote, promotionWindow } from "./core/rate.ts";
+import css from "./client.css";
 
 declare const window: Window & { __ModuleLoader__: any };
 window.__ModuleLoader__.load({
@@ -7,380 +8,68 @@ window.__ModuleLoader__.load({
     const React = require("react");
     const h = React.createElement;
     const { useState, useEffect, useRef } = React;
-    const css = `
-.chub{
-  --chub-text:var(--dsw-alias-label-primary,var(--text-primary,inherit));
-  --chub-text-2:var(--dsw-alias-label-secondary,#6b7280);
-  --chub-text-3:var(--dsw-alias-label-tertiary,#9ca3af);
-  --chub-line:var(--dsw-alias-border-l2,rgba(128,128,128,.28));
-  --chub-line-soft:var(--dsw-alias-border-l1,rgba(128,128,128,.16));
-  --chub-layer-1:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.06));
-  --chub-layer-2:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.09));
-  --chub-layer-3:var(--dsw-alias-bg-layer-3,rgba(127,127,127,.13));
-  --chub-accent:var(--dsw-alias-state-business-primary,#5785dd);
-  --chub-ok:var(--dsw-alias-state-success-primary,#2f9e6b);
-  --chub-warn:var(--dsw-alias-state-warning-primary,#d6922f);
-  --chub-err:var(--dsw-alias-state-error-primary,#d55b5b);
-  display:flex;
-  flex-direction:column;
-  gap:16px;
-  width:100%;
-  max-width:1080px;
-  margin:0 auto;
-  padding:4px 2px 28px;
-  box-sizing:border-box;
-  color:var(--chub-text);
-  font-size:15px;
-  line-height:1.55;
-}
-.chub *{box-sizing:border-box}
-.chub ::selection{background:color-mix(in srgb,var(--chub-accent) 30%,transparent)}
-.chub h2,.chub h3,.chub h4,.chub p{margin:0}
-.chub h2{font-size:27px;line-height:1.2;font-weight:760;letter-spacing:-.02em}
-.chub h3{font-size:16px;line-height:1.35;font-weight:680}
-.chub h4{font-size:14.5px;line-height:1.4;font-weight:660}
-.chub a{color:var(--chub-accent);text-decoration:none}
-.chub a:hover{text-decoration:underline}
-.chub :focus-visible{outline:2px solid color-mix(in srgb,var(--chub-accent) 72%,transparent);outline-offset:2px}
-.chub-hero{
-  position:relative;
-  display:flex;
-  flex-direction:column;
-  gap:16px;
-  padding:22px 24px 20px;
-  overflow:hidden;
-  border:1px solid var(--chub-line-soft);
-  border-radius:20px;
-  background:
-    radial-gradient(120% 160% at 100% 0%,color-mix(in srgb,var(--chub-accent) 14%,transparent),transparent 58%),
-    linear-gradient(165deg,var(--chub-layer-2),var(--chub-layer-1));
-  box-shadow:inset 0 1px 0 color-mix(in srgb,#fff 8%,transparent);
-}
-.chub-hero::after{
-  content:"";
-  position:absolute;
-  right:-90px;
-  top:-110px;
-  width:280px;
-  height:280px;
-  border-radius:50%;
-  border:1px solid color-mix(in srgb,var(--chub-accent) 22%,transparent);
-  pointer-events:none;
-}
-.chub-pagehead{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;position:relative;z-index:1}
-.chub-headline{display:flex;flex-direction:column;gap:5px;min-width:0;flex:1 1 420px}
-.chub-eyebrow{font-size:12px;line-height:1.4;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--chub-accent)}
-.chub-headline h2{background:linear-gradient(110deg,var(--chub-text),color-mix(in srgb,var(--chub-accent) 72%,var(--chub-text)));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
-.chub-sub{margin:0;max-width:66ch;font-size:14px;line-height:1.65;color:var(--chub-text-2)}
-.chub-pills{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-left:auto;padding-bottom:2px}
-.chub-pill{
-  display:inline-flex;
-  align-items:center;
-  gap:6px;
-  padding:4px 9px;
-  border:1px solid var(--chub-line-soft);
-  border-radius:999px;
-  background:color-mix(in srgb,var(--chub-layer-2) 78%,transparent);
-  color:var(--chub-text-2);
-  font-size:12.5px;
-  line-height:1.5;
-  font-weight:560;
-  white-space:nowrap;
-}
-.chub-dot{width:6px;height:6px;border-radius:50%;background:var(--chub-text-3);flex:none}
-.chub-pill.ok{color:var(--chub-ok);border-color:color-mix(in srgb,var(--chub-ok) 28%,transparent);background:color-mix(in srgb,var(--chub-ok) 8%,transparent)}
-.chub-pill.ok .chub-dot{background:var(--chub-ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--chub-ok) 14%,transparent)}
-.chub-pill.err{color:var(--chub-err);border-color:color-mix(in srgb,var(--chub-err) 30%,transparent);background:color-mix(in srgb,var(--chub-err) 8%,transparent)}
-.chub-pill.err .chub-dot{background:var(--chub-err)}
-.chub-ministats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;position:relative;z-index:1}
-.chub-mini{display:flex;flex-direction:column;gap:1px;min-width:0;padding:8px 10px;border:1px solid var(--chub-line-soft);border-radius:11px;background:color-mix(in srgb,var(--chub-layer-1) 76%,transparent)}
-.chub-mini span{font-size:11.5px;line-height:1.4;font-weight:650;letter-spacing:.08em;text-transform:uppercase;color:var(--chub-text-3)}
-.chub-mini b{font-size:19px;line-height:1.25;font-weight:700;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
-.chub-mini i{font-style:normal;font-size:12px;line-height:1.4;color:var(--chub-text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chub-navbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.chub-tabs{display:inline-flex;align-items:center;gap:3px;padding:4px;border:1px solid var(--chub-line-soft);border-radius:12px;background:var(--chub-layer-1)}
-.chub-tabs button{
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  gap:6px;
-  border:0;
-  border-radius:8px;
-  padding:6px 13px;
-  background:transparent;
-  color:var(--chub-text-2);
-  font:inherit;
-  font-size:14px;
-  font-weight:600;
-  line-height:1.5;
-  cursor:pointer;
-  transition:background .16s ease,color .16s ease,box-shadow .16s ease;
-  white-space:nowrap;
-}
-.chub-tabs button:hover{background:color-mix(in srgb,var(--chub-layer-2) 82%,transparent);color:var(--chub-text)}
-.chub-tabs button[aria-current=page]{background:var(--chub-layer-3);color:var(--chub-text);box-shadow:inset 0 1px 0 color-mix(in srgb,#fff 10%,transparent),0 1px 2px rgba(0,0,0,.08)}
-.chub-tabcount{font-style:normal;font-size:12px;line-height:1;padding:3px 5px;border-radius:999px;background:color-mix(in srgb,var(--chub-accent) 14%,transparent);color:var(--chub-accent);font-variant-numeric:tabular-nums}
-.chub-navacts{display:flex;align-items:center;gap:9px;margin-left:auto}
-.chub-hint{font-size:12.5px;color:var(--chub-text-3);white-space:nowrap}
-.chub-btn{
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  gap:5px;
-  border:1px solid var(--chub-line);
-  border-radius:9px;
-  padding:6px 11px;
-  background:var(--chub-layer-2);
-  color:var(--chub-text);
-  font:inherit;
-  font-size:14px;
-  font-weight:560;
-  line-height:1.5;
-  cursor:pointer;
-  white-space:nowrap;
-  transition:background .16s ease,border-color .16s ease,color .16s ease,transform .16s ease;
-}
-.chub-btn:hover:not(:disabled){background:var(--chub-layer-3);border-color:color-mix(in srgb,var(--chub-accent) 38%,var(--chub-line))}
-.chub-btn:active:not(:disabled){transform:translateY(1px)}
-.chub-btn.primary{border-color:color-mix(in srgb,var(--chub-accent) 36%,var(--chub-line));background:color-mix(in srgb,var(--chub-accent) 13%,var(--chub-layer-1));color:var(--chub-accent)}
-.chub-btn.primary:hover:not(:disabled){background:color-mix(in srgb,var(--chub-accent) 20%,var(--chub-layer-1))}
-.chub-btn.ghost{border-color:transparent;background:transparent;color:var(--chub-text-2)}
-.chub-btn.ghost:hover:not(:disabled){border-color:var(--chub-line-soft);background:var(--chub-layer-1);color:var(--chub-text)}
-.chub-btn.danger{color:var(--chub-err)}
-.chub-btn.danger:hover:not(:disabled){border-color:color-mix(in srgb,var(--chub-err) 36%,var(--chub-line));background:color-mix(in srgb,var(--chub-err) 10%,transparent)}
-.chub-btn.small{padding:3px 8px;border-radius:7px;font-size:12.5px;font-weight:560}
-.chub-btn:disabled{opacity:.42;cursor:not-allowed}
-.chub-alert{display:flex;flex-direction:column;gap:3px;padding:10px 13px;border:1px solid var(--chub-line);border-radius:12px;background:var(--chub-layer-1)}
-.chub-alert b{font-size:14px;line-height:1.5;font-weight:650}
-.chub-alert p{margin:0;font-size:13.5px;line-height:1.65;color:var(--chub-text-2);overflow-wrap:anywhere}
-.chub-alert a{font-size:13.5px;font-weight:600;align-self:flex-start}
-.chub-alert code{padding:1px 5px;border-radius:5px;background:var(--chub-layer-2);font-size:13px}
-.chub-alert.err{border-color:color-mix(in srgb,var(--chub-err) 32%,transparent);background:color-mix(in srgb,var(--chub-err) 7%,var(--chub-layer-1))}
-.chub-alert.err b{color:var(--chub-err)}
-.chub-alert.info{border-color:color-mix(in srgb,var(--chub-accent) 32%,transparent);background:color-mix(in srgb,var(--chub-accent) 7%,var(--chub-layer-1))}
-.chub-alert.info b{color:var(--chub-accent)}
-.chub-filters{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border:1px solid var(--chub-line-soft);border-radius:13px;background:var(--chub-layer-1)}
-.chub-filterhead{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
-.chub-filterhead b{font-size:13.5px;font-weight:650}
-.chub-filterhead span{font-size:12.5px;color:var(--chub-text-3)}
-.chub-filterrow{display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap}
-.chub-field{display:flex;flex-direction:column;gap:3px;flex:1 1 148px;min-width:0}
-.chub-field.grow{flex:2 1 210px}
-.chub-field>span{font-size:11.5px;line-height:1.4;font-weight:650;letter-spacing:.06em;text-transform:uppercase;color:var(--chub-text-3)}
-.chub-field select,.chub-field input{width:100%;min-width:0;padding:5px 8px;border:1px solid var(--chub-line);border-radius:8px;background:var(--chub-layer-2);color:var(--chub-text);font:inherit;font-size:13.5px;line-height:1.5}
-.chub-field input::placeholder{color:var(--chub-text-3)}
-.chub-body{display:flex;flex-direction:column;gap:14px;animation:chub-in .28s ease both}
-.chub-section{display:flex;flex-direction:column;gap:10px}
-.chub-sectionhead{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--chub-line-soft)}
-.chub-sectionhead>div:first-child{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 320px}
-.chub-sectionhint{margin:0;font-size:13px;line-height:1.6;color:var(--chub-text-3)}
-.chub-sectools{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.chub-channels{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px;align-items:start}
-.chub-channel{
-  --chan-accent:var(--chub-accent);
-  position:relative;
-  display:flex;
-  flex-direction:column;
-  gap:10px;
-  min-width:0;
-  padding:15px 16px 13px;
-  overflow:hidden;
-  border:1px solid var(--chub-line-soft);
-  border-radius:15px;
-  background:linear-gradient(160deg,var(--chub-layer-2),var(--chub-layer-1));
-  transition:border-color .18s ease,transform .18s ease,box-shadow .18s ease;
-}
-.chub-channel::before{content:"";position:absolute;inset:0 0 auto;height:2px;background:linear-gradient(90deg,var(--chan-accent),transparent 76%);opacity:.72}
-.chub-channel[data-state=idle]::before{background:linear-gradient(90deg,var(--chub-warn),transparent 76%)}
-.chub-channel[data-state=err]::before{background:linear-gradient(90deg,var(--chub-err),transparent 76%)}
-.chub-channel[data-state=off]::before{background:linear-gradient(90deg,var(--chub-text-3),transparent 76%)}
-.chub-chanhead{display:flex;align-items:center;gap:9px;min-width:0}
-.chub-chanlogo{
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  width:32px;
-  height:32px;
-  flex:none;
-  border-radius:10px;
-  background:linear-gradient(145deg,color-mix(in srgb,var(--chan-accent) 82%,#fff),color-mix(in srgb,var(--chan-accent) 54%,#07111f));
-  color:#fff;
-  font-size:12.5px;
-  font-weight:760;
-  letter-spacing:.02em;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.24),0 4px 10px color-mix(in srgb,var(--chan-accent) 18%,transparent);
-}
-.chub-chanid{display:flex;flex-direction:column;gap:0;min-width:0;flex:1}
-.chub-chanid b{font-size:15px;line-height:1.45;font-weight:680;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chub-chanid span{font-size:12px;line-height:1.45;color:var(--chub-text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chub-chanstate{display:inline-flex;align-items:center;gap:4px;flex:none;padding:2px 7px;border:1px solid var(--chub-line-soft);border-radius:999px;color:var(--chub-text-3);font-size:11.5px;font-weight:600;line-height:1.5;white-space:nowrap}
-.chub-chanstate::before{content:"";width:4px;height:4px;border-radius:50%;background:currentColor}
-.chub-channel[data-state=on] .chub-chanstate{color:var(--chub-ok);border-color:color-mix(in srgb,var(--chub-ok) 26%,transparent);background:color-mix(in srgb,var(--chub-ok) 7%,transparent)}
-.chub-channel[data-state=idle] .chub-chanstate{color:var(--chub-warn);border-color:color-mix(in srgb,var(--chub-warn) 26%,transparent);background:color-mix(in srgb,var(--chub-warn) 7%,transparent)}
-.chub-channel[data-state=err] .chub-chanstate{color:var(--chub-err);border-color:color-mix(in srgb,var(--chub-err) 28%,transparent);background:color-mix(in srgb,var(--chub-err) 7%,transparent)}
-.chub-chanmeta{display:flex;align-items:center;gap:4px 9px;flex-wrap:wrap;padding:5px 0 1px;border-top:1px dashed var(--chub-line-soft);font-size:12px;line-height:1.5;color:var(--chub-text-3)}
-.chub-chanmeta b{font-weight:650;color:var(--chub-text-2);font-variant-numeric:tabular-nums}
-.chub-chanmeta .warn{color:var(--chub-warn)}
-.chub-chanacts{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
-.chub-smsform{display:flex;flex-direction:column;gap:7px;padding:10px 11px;border:1px solid var(--chub-line-soft);border-radius:12px;background:var(--chub-layer-1)}
-.chub-smsform .chub-smsfields{display:flex;gap:8px;flex-wrap:wrap}
-.chub-smsform .chub-field{flex:1 1 132px}
-.chub-acctlist{display:flex;flex-direction:column;gap:7px}
-.chub-acct{
-  display:flex;
-  flex-direction:column;
-  gap:7px;
-  min-width:0;
-  padding:9px 10px;
-  border:1px solid var(--chub-line-soft);
-  border-radius:11px;
-  background:color-mix(in srgb,var(--chub-layer-1) 82%,transparent);
-}
-.chub-acct:has(input:focus-visible){border-color:color-mix(in srgb,var(--chub-accent) 48%,var(--chub-line))}
-.chub-accthead{display:flex;align-items:center;gap:7px;min-width:0}
-.chub-avatar{display:inline-flex;align-items:center;justify-content:center;width:23px;height:23px;flex:none;border-radius:7px;background:color-mix(in srgb,var(--chan-accent) 16%,var(--chub-layer-2));color:var(--chan-accent);font-size:11px;font-weight:720}
-.chub-acctid{display:flex;flex-direction:column;gap:0;min-width:0;flex:1}
-.chub-acctid b{font-size:13.5px;line-height:1.5;font-weight:640;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chub-acctid span{font-size:11.5px;line-height:1.45;color:var(--chub-text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chub-acctid i{font-style:normal}
-.chub-acctid i.warn{color:var(--chub-warn)}
-.chub-acctid i.err{color:var(--chub-err)}
-.chub-acctbadges{display:flex;align-items:center;gap:4px;flex-wrap:wrap;justify-content:flex-end}
-.chub-badge{display:inline-flex;align-items:center;padding:1px 6px;border:1px solid var(--chub-line-soft);border-radius:999px;background:var(--chub-layer-1);color:var(--chub-text-3);font-size:11px;line-height:1.5;font-weight:600;white-space:nowrap}
-.chub-badge.ok{color:var(--chub-ok);border-color:color-mix(in srgb,var(--chub-ok) 24%,transparent);background:color-mix(in srgb,var(--chub-ok) 7%,transparent)}
-.chub-badge.warn{color:var(--chub-warn);border-color:color-mix(in srgb,var(--chub-warn) 24%,transparent);background:color-mix(in srgb,var(--chub-warn) 7%,transparent)}
-.chub-badge.err{color:var(--chub-err);border-color:color-mix(in srgb,var(--chub-err) 26%,transparent);background:color-mix(in srgb,var(--chub-err) 7%,transparent)}
-.chub-acctmeta{display:flex;align-items:center;gap:3px 8px;flex-wrap:wrap;font-size:11.5px;line-height:1.5;color:var(--chub-text-3)}
-.chub-acctmeta b{font-weight:650;color:var(--chub-text-2)}
-.chub-acctmeta .warn{color:var(--chub-warn)}
-.chub-acctmeta .err{color:var(--chub-err)}
-/* 额度读数：数值与单位在宿主侧拼好（core/credits.ts），这里只排版。 */
-.chub-credits{display:flex;flex-direction:column;gap:4px;min-width:0}
-.chub-creditline{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;line-height:1.5;color:var(--chub-text-2)}
-.chub-creditline>b{font-weight:680;font-variant-numeric:tabular-nums;color:var(--chub-text)}
-.chub-creditline .chub-creditlabel{font-size:11.5px;font-weight:650;letter-spacing:.06em;text-transform:uppercase;color:var(--chub-text-3)}
-.chub-creditline .err{color:var(--chub-err)}
-.chub-creditline .muted{color:var(--chub-text-3)}
-.chub-credittag{flex:none;padding:0 5px;border:1px solid color-mix(in srgb,var(--chan-accent) 22%,transparent);border-radius:999px;background:color-mix(in srgb,var(--chan-accent) 9%,transparent);color:color-mix(in srgb,var(--chan-accent) 66%,var(--chub-text));font-size:11px;font-weight:600;line-height:1.6;white-space:nowrap}
-.chub-creditbar{height:4px;overflow:hidden;border-radius:2px;background:var(--chub-layer-3)}
-.chub-creditbar>i{display:block;height:100%;border-radius:inherit;background:var(--chan-accent)}
-.chub-creditbar.low>i{background:var(--chub-warn)}
-.chub-creditnote{margin:0;font-size:11.5px;line-height:1.5;color:var(--chub-text-3);overflow-wrap:anywhere}
-.chub-creditnote.err{color:var(--chub-err)}
-.chub-pkgs{display:flex;flex-direction:column;gap:5px;padding-top:5px}
-.chub-pkg{display:flex;flex-direction:column;gap:3px;min-width:0;padding:5px 7px;border-radius:7px;background:color-mix(in srgb,var(--chub-layer-2) 62%,transparent)}
-.chub-pkg.off{opacity:.5}
-.chub-pkghead{display:flex;align-items:baseline;gap:6px;min-width:0;font-size:11.5px;line-height:1.5;color:var(--chub-text-3)}
-.chub-pkgname{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--chub-text-2);font-weight:600}
-.chub-pkgval{flex:none;font-variant-numeric:tabular-nums;color:var(--chub-text-2)}
-.chub-pkgwhen{flex:none;font-variant-numeric:tabular-nums;color:var(--chub-text-3);white-space:nowrap}
-.chub-acctacts{display:flex;align-items:center;gap:3px;flex-wrap:wrap}
-.chub-inline{margin:0;font-size:12.5px;line-height:1.6;color:var(--chub-text-2);overflow-wrap:anywhere}
-.chub-inline.err{color:var(--chub-err)}
-.chub-inline.muted{color:var(--chub-text-3)}
-.chub-models summary,.chub-fold summary{display:flex;align-items:center;gap:6px;list-style:none;cursor:pointer;color:var(--chub-text-2);font-size:12.5px;line-height:1.5}
-.chub-models summary::-webkit-details-marker,.chub-fold summary::-webkit-details-marker{display:none}
-.chub-models summary::before,.chub-fold summary::before{content:"›";display:inline-block;color:var(--chub-text-3);font-size:16px;line-height:1;transition:transform .15s ease;transform:translateY(-1px)}
-.chub-models[open] summary::before,.chub-fold[open] summary::before{transform:rotate(90deg) translateX(-1px)}
-.chub-models summary{padding:5px 7px;border:1px solid var(--chub-line-soft);border-radius:8px;background:var(--chub-layer-1)}
-.chub-models summary:hover{border-color:color-mix(in srgb,var(--chan-accent) 34%,var(--chub-line))}
-.chub-summaryhint{margin-left:auto;font-size:11.5px;font-weight:400;color:var(--chub-text-3);text-align:right}
-.chub-modelacts{display:flex;align-items:center;gap:4px;padding:7px 2px 1px;flex-wrap:wrap}
-.chub-modelacthint{margin-right:auto;color:var(--chub-text-3);font-size:11.5px}
-.chub-modellist{display:grid;grid-template-columns:1fr;gap:3px;padding-top:6px}
-.chub-model{display:flex;align-items:center;gap:6px;min-width:0;padding:5px 7px;border-radius:6px;background:color-mix(in srgb,var(--chub-layer-2) 66%,transparent);font-size:12px;line-height:1.5;cursor:pointer}
-.chub-model:hover{background:var(--chub-layer-2)}
-.chub-model.off{opacity:.48}
-.chub-model input{width:13px;height:13px;margin:0;flex:none;accent-color:var(--chub-accent)}
-.chub-modelname{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--chub-text-2)}
-.chub-promo{flex:none;padding:0 5px;border-radius:999px;background:color-mix(in srgb,var(--chub-warn) 14%,transparent);color:color-mix(in srgb,var(--chub-warn) 80%,var(--chub-text));font-size:11px;font-weight:600;line-height:1.6;letter-spacing:0;white-space:nowrap}
-.chub-factor{flex:none;padding:0 5px;border:1px solid color-mix(in srgb,var(--chan-accent) 22%,transparent);border-radius:999px;background:color-mix(in srgb,var(--chan-accent) 10%,var(--chub-layer-2));color:color-mix(in srgb,var(--chan-accent) 68%,var(--chub-text));font-size:11px;font-weight:650;line-height:1.6;font-variant-numeric:tabular-nums;letter-spacing:0;white-space:nowrap}
-.chub-panel{display:flex;flex-direction:column;gap:10px;min-width:0;padding:14px 15px;border:1px solid var(--chub-line-soft);border-radius:14px;background:linear-gradient(160deg,var(--chub-layer-1),color-mix(in srgb,var(--chub-layer-1) 62%,transparent))}
-.chub-panelhead{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
-.chub-panelhead>div:first-child{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 280px}
-.chub-panelhead p{margin:0;font-size:12.5px;line-height:1.55;color:var(--chub-text-3)}
-.chub-panelhint{font-size:12px;color:var(--chub-text-3);white-space:nowrap}
-/* 6 张卡在宽屏按 3 列排满两行；auto-fit 会在 1240px 下排出 5+1 的孤行。 */
-.chub-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}
-.chub-kpi{display:flex;flex-direction:column;gap:1px;min-width:0;padding:12px 13px;border:1px solid var(--chub-line-soft);border-radius:12px;background:linear-gradient(165deg,var(--chub-layer-2),var(--chub-layer-1))}
-.chub-kpilabel{font-size:11.5px;line-height:1.4;font-weight:650;letter-spacing:.08em;text-transform:uppercase;color:var(--chub-text-3)}
-.chub-kpivalue{font-size:28px;line-height:1.2;font-weight:760;letter-spacing:-.025em;font-variant-numeric:tabular-nums;background:linear-gradient(110deg,var(--chub-text),color-mix(in srgb,var(--chub-accent) 68%,var(--chub-text)));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;overflow-wrap:anywhere}
-.chub-kpisub{font-size:12px;line-height:1.5;color:var(--chub-text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chub-notes{display:flex;align-items:center;gap:4px 12px;flex-wrap:wrap;padding:8px 11px;border:1px dashed var(--chub-line-soft);border-radius:10px;font-size:12.5px;line-height:1.5;color:var(--chub-text-3)}
-.chub-notes b{font-weight:650;color:var(--chub-text-2)}
-.chub-chartbody{display:flex;flex-direction:column;gap:4px;padding-top:2px}
-.chub-chartsvg{display:block;width:100%;height:150px;overflow:visible}
-.chub-bar{fill:color-mix(in srgb,var(--chub-accent) 68%,transparent);transition:opacity .15s ease}
-.chub-bar:hover{opacity:1}
-.chub-gridline{stroke:var(--chub-line-soft);stroke-width:1;stroke-dasharray:3 5}
-/* 标签按柱子格数等分，每格居中 —— 与 SVG 里「柱心 = 格中点」严格对齐。 */
-.chub-axis{display:grid;align-items:center;gap:0;font-size:11.5px;color:var(--chub-text-3);font-variant-numeric:tabular-nums}
-.chub-axis span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
-/* 双栏最小 430px：再窄就单列，避免 7 列表格被压到只剩横向滚动。 */
-.chub-grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));gap:10px;align-items:stretch}
-.chub-grid2>section{display:flex;flex-direction:column}
-.chub-fold{margin-top:1px;padding-top:7px;border-top:1px dashed var(--chub-line-soft)}
-.chub-pre{max-height:210px;margin:5px 0 0;padding:9px 10px;overflow:auto;border-radius:9px;background:var(--chub-layer-1);font-size:12px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
-.chub-scroll{overflow:auto;border:1px solid var(--chub-line-soft);border-radius:11px;background:color-mix(in srgb,var(--chub-layer-1) 55%,transparent)}
-.chub-panel>.chub-scroll{border-color:transparent;background:transparent}
-.chub-scroll table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.45}
-.chub-scroll th{position:sticky;top:0;z-index:1;padding:7px 9px;border-bottom:1px solid var(--chub-line);background:var(--chub-layer-2);color:var(--chub-text-3);font-size:11.5px;font-weight:650;letter-spacing:.03em;text-align:left;white-space:nowrap}
-.chub-scroll td{padding:6px 9px;border-top:1px solid var(--chub-line-soft);color:var(--chub-text-2);text-align:left;white-space:nowrap}
-/* 「详情」列放的是可展开的 JSON：不换行会把整张表撑出容器。 */
-.chub-scroll td:last-child{white-space:normal;vertical-align:top}
-.chub-scroll td:last-child details{max-width:260px}
-.chub-scroll td:last-child .chub-pre{max-width:260px}
-.chub-scroll td:last-child summary{white-space:nowrap}
-.chub-scroll tbody tr:first-child td{border-top:0}
-.chub-scroll tbody tr:hover td{background:color-mix(in srgb,var(--chub-layer-2) 52%,transparent)}
-.chub-scroll code{padding:1px 4px;border-radius:4px;background:var(--chub-layer-2);font-size:11.5px}
-.chub-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:22px 16px;border:1px dashed var(--chub-line);border-radius:11px;background:color-mix(in srgb,var(--chub-layer-1) 62%,transparent);text-align:center}
-.chub-empty b{font-size:13.5px;font-weight:640}
-.chub-empty p{margin:0;font-size:12.5px;line-height:1.55;color:var(--chub-text-3)}
-.chub-pager{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--chub-text-3)}
-.chub-pager>div{display:flex;align-items:center;gap:5px}
-.chub-pager b{font-weight:650;color:var(--chub-text-2);font-variant-numeric:tabular-nums}
-.chub-logpanel{padding:0;overflow:hidden}
-.chub-migration{gap:9px}
-.chub-panelacts{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-@keyframes chub-in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
-@media (hover:hover){
-  .chub-channel:hover{transform:translateY(-2px);border-color:color-mix(in srgb,var(--chan-accent) 30%,var(--chub-line));box-shadow:0 12px 28px color-mix(in srgb,#000 10%,transparent)}
-}
-@media (max-width:820px){
-  .chub-channels{grid-template-columns:1fr}
-  .chub-grid2{grid-template-columns:1fr}
-  .chub-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .chub-hero{padding:18px 18px 16px}
-}
-@media (max-width:560px){
-  .chub{gap:13px;padding:0 0 20px}
-  .chub h2{font-size:23px}
-  .chub-hero{padding:15px 14px 13px;border-radius:16px}
-  .chub-pagehead{align-items:flex-start}
-  .chub-pills{width:100%;margin-left:0}
-  .chub-pill{flex:1;justify-content:center}
-  .chub-ministats{grid-template-columns:1fr 1fr}
-  .chub-kpis{grid-template-columns:1fr}
-  .chub-navbar{align-items:stretch}
-  .chub-tabs{width:100%}
-  .chub-tabs button{flex:1;padding:6px 8px}
-  .chub-navacts{width:100%;justify-content:space-between}
-  .chub-field,.chub-field.grow{flex:1 1 100%}
-  .chub-channel{padding:13px 13px 11px;border-radius:13px}
-  .chub-panel{padding:12px 12px}
-  .chub-chanstate{display:none}
-}
-@media (prefers-reduced-motion:reduce){
-  .chub *,.chub *::before,.chub *::after{animation-duration:.001ms !important;transition-duration:.001ms !important}
-}
-`;
+    /* 页面样式见 client.css（esbuild 以 text loader 内联为字符串）。 */
+
     const fmt = (n: any, d = 0) =>
       typeof n === "number"
         ? n.toLocaleString("zh-CN", { maximumFractionDigits: d })
         : "—";
     const pct = (n: any) =>
       typeof n === "number" ? fmt(n * 100, 1) + "%" : "—";
+    /**
+     * 把一组分量折算成堆叠柱里各段的像素高度，**并保证每段都看得见**。
+     *
+     * ⚠️ 真实缺陷（2026-10-21，真实账本实测）：某天 11 个渠道里前三个占了
+     * 90%，其余 8 个按纯比例只有 0.1–1.6px —— 渲染出来是一条看不见的细线。
+     * 而用户看这张图的目的正是「哪个渠道在消耗」，占比最小的那些恰恰最需要
+     * 能看见（否则图上一片空白，只能猜）。
+     *
+     * 做法：先按比例分配；把低于 `minHeight` 的段抬到下限，缺口从仍有富余的
+     * 段里**按富余比例**扣回。于是：
+     *  - 总高不变 ⇒ 不同日期的柱子仍然可比；
+     *  - 每个非零分量至少有 `minHeight` 像素 ⇒ 不丢信息；
+     *  - 大段被轻微压缩，但相对关系不变（这才是可接受的取舍）。
+     *
+     * 极端情况（柱高本身就放不下所有下限）退化为**等高**：与其让某些段消失，
+     * 不如临时放弃比例、保证全部可见。
+     *
+     * @param values - 各分量原始值（须 ≥ 0）。
+     * @param barHeight - 整根柱子的像素高度。
+     * @param minHeight - 单段最小可见高度。
+     * @returns 与 `values` 等长的高度数组。
+     */
+    function stackHeights(
+      values: number[],
+      barHeight: number,
+      minHeight: number,
+    ): number[] {
+      const count = values.length;
+      if (count === 0) return [];
+      const total = values.reduce((n, v) => n + v, 0);
+      if (!(total > 0) || !(barHeight > 0)) return values.map(() => 0);
+      // 空间不够放下所有下限：等高，宁可放弃比例也不让段落消失。
+      if (barHeight <= minHeight * count)
+        return values.map(() => barHeight / count);
+      const heights = values.map((v) => (v / total) * barHeight);
+      let deficit = 0;
+      for (let i = 0; i < count; i++) {
+        if (heights[i]! < minHeight) {
+          deficit += minHeight - heights[i]!;
+          heights[i] = minHeight;
+        }
+      }
+      if (deficit > 0) {
+        // 只能从「高于下限」的段里扣，且按各自富余量等比扣，避免压穿下限。
+        const room = heights.map((h, i) =>
+          values[i]! > 0 && h > minHeight ? h - minHeight : 0,
+        );
+        const roomTotal = room.reduce((n, v) => n + v, 0);
+        if (roomTotal > 0)
+          for (let i = 0; i < count; i++)
+            if (room[i]! > 0) heights[i]! -= (room[i]! / roomTotal) * deficit;
+      }
+      return heights;
+    }
     const date = (n: any) => (n ? new Date(n).toLocaleString("zh-CN") : "—");
     const mark = (name: any) =>
       String(name ?? "")
@@ -419,6 +108,12 @@ window.__ModuleLoader__.load({
       if (n - Date.now() < 86400000) return { text: "今日到期", tone: "warn" };
       return { text: date(n), tone: "" };
     };
+    /**
+     * 整个渠道中心页面。
+     *
+     * 唯一入口是宿主的整窗主区域（`main` keyed slot，`width:100%;height:100%`），
+     * 故不再需要区分「整窗 / 设置窄页」的布局分支 —— 设置里那份入口已经移除。
+     */
     function Page({ ctx }: any) {
       const [tab, setTab] = useState("channels");
       const [channels, setChannels] = useState([] as any[]);
@@ -689,8 +384,27 @@ window.__ModuleLoader__.load({
           setBusy(false);
         }
       };
-      const table = (heads: string[], rows: any[][]) =>
-        h(
+      /**
+       * 一个数据表。
+       *
+       * @param heads - 表头文字。
+       * @param rows - 行数据。
+       * @param wide - 允许换行的列下标（长文本列，如「渠道 / 模型」「账号」）。
+       *   其余列一律单行：短内容换行只会让行高翻倍、表变得更难读。
+       * @param low - 次要列下标：容器窄时整列隐藏，避免出现横向滚动条。
+       *   只用于「值在别处也能查到」的列（步数、缓存读/写等，详情 JSON 里都有）。
+       *
+       * ⚠️ 用**列下标白名单**而不是给每个格子传样式：表格结构保持不变，
+       * 只需说明「哪几列是长文本、哪几列可以牺牲」。
+       */
+      const table = (
+        heads: string[],
+        rows: any[][],
+        wide: number[] = [],
+        low?: number[],
+      ) => {
+        const last = heads.length - 1;
+        return h(
           "div",
           { className: "chub-scroll" },
           h(
@@ -699,7 +413,22 @@ window.__ModuleLoader__.load({
             h(
               "thead",
               null,
-              h("tr", null, ...heads.map((x) => h("th", { key: x }, x))),
+              h(
+                "tr",
+                null,
+                ...heads.map((x, j) =>
+                  h(
+                    "th",
+                    {
+                      key: x,
+                      ...(low === undefined || !low.includes(j)
+                        ? {}
+                        : { className: "lowpri" }),
+                    },
+                    x,
+                  ),
+                ),
+              ),
             ),
             h(
               "tbody",
@@ -708,18 +437,43 @@ window.__ModuleLoader__.load({
                 h(
                   "tr",
                   { key: i },
-                  ...row.map((v, j) => h("td", { key: j }, v)),
+                  ...row.map((v, j) => {
+                    // 次要列在窄容器里整列隐藏（见 CSS 的 lowpri 规则）。
+                    const classes = [
+                      ...(low !== undefined && low.includes(j) ? ["lowpri"] : []),
+                      ...(j === last
+                        ? []
+                        : wide.includes(j)
+                          ? ["wide"]
+                          : ["nowrap"]),
+                    ];
+                    return h(
+                      "td",
+                      {
+                        key: j,
+                        ...(classes.length === 0
+                          ? {}
+                          : { className: classes.join(" ") }),
+                      },
+                      v,
+                    );
+                  }),
                 ),
               ),
             ),
           ),
         );
+      };
       /**
        * 运行日志表：**一行一轮**。
        *
        * 一轮 = 同一条用户消息引发的全部模型调用（`logs.items` 由宿主按
-       * `turnId` 聚合好）；「步数」列给出该轮调用了几次，详情只放最后一次
-       * 调用的尝试原始数据，不再逐层展开每一步。
+       * `turnId` 聚合好）；「步数」列给出该轮调用了几次。
+       *
+       * ⚠️ **没有「详情」列**（用户 2026-10-21 要求移除）：那一列是逐行的
+       * attempts JSON 展开，占掉整张表最宽的位置，实际只在排查时用一次。
+       * 移除后错误原因不能随之消失 —— 故改挂到「结果」徽标的 `title` 上：
+       * 悬停即见原因，不需要展开、也不再占一列宽度。
        *
        * 「流式速度」与「整块吞吐」是两个口径，分开显示：
        * - 流式速度 = 输出 token /（首字 → 结束），只有观测到首字才有；
@@ -738,16 +492,15 @@ window.__ModuleLoader__.load({
             "首字",
             "流式速度",
             "整块吞吐",
-            "输入 / 输出",
             "缓存读 / 写",
             "思考",
             "缓存命中率",
-            "详情",
           ],
           items.map((r) => {
             const a = r.attempts?.at(-1),
-              m = r.metrics,
-              steps = Array.isArray(r.steps) ? r.steps : [];
+              m = r.metrics;
+            /** 该轮的失败原因（可能来自请求本身或最后一次上游尝试）。 */
+            const failure = r.error ?? a?.error;
             return [
               date(r.started),
               r.provider + " / " + r.model,
@@ -761,6 +514,10 @@ window.__ModuleLoader__.load({
                       : r.outcome === "running" || r.outcome === "cancelled"
                         ? "warn"
                         : "err"),
+                  // 详情列移除后，错误原因靠这里悬停可见。
+                  ...(failure === undefined || failure === ""
+                    ? {}
+                    : { title: failure }),
                 },
                 r.outcome,
               ),
@@ -772,33 +529,27 @@ window.__ModuleLoader__.load({
               m?.avgThroughput !== null
                 ? fmt(m?.avgThroughput, 1) + " tok/s"
                 : "—",
-              m?.reported
-                ? fmt(m.input) +
-                  " / " +
-                  fmt(m.output) +
-                  (m.reported < m.attempts ? "（部分）" : "")
-                : "—",
+              // ⚠️ 「输入 / 输出」列已移除（用户 2026-10-21）：
+              // 那一列的数值在数据看板按渠道 / 模型汇总时更可读，日志表里
+              // 每行都重复一遍既占宽又不便横向对比。token 总量仍在看板与
+              // 概览小指标里。
               (m?.cacheSamples ? fmt(m.cacheRead) : "—") +
                 " / " +
                 (m?.cacheWriteSamples ? fmt(m.cacheWrite) : "—"),
               m?.reasoningSamples ? fmt(m.reasoning) : "—",
               pct(m?.cacheHitRate),
-              h(
-                "details",
-                { title: r.error ?? a?.error },
-                h(
-                  "summary",
-                  null,
-                  (r.stepCount ?? 1) + " 步 · " + (steps.length || 1) + " 次调用",
-                ),
-                h(
-                  "pre",
-                  { className: "chub-pre" },
-                  JSON.stringify(r.attempts, null, 2),
-                ),
-              ),
             ];
           }),
+          // 只有「渠道 / 模型」(1) 与「账号」(3) 可能很长，允许折行；
+          // 其余是时间、毫秒、tok/s、token 数这类短内容，保持单行。
+          [1, 3],
+          /*
+           * 窄容器下牺牲的两列：缓存读/写 (9) 与思考 (10)。
+           *
+           * ⚠️ 下标随列数变化 —— 移除「输入 / 输出」后这两列各前移一位。
+           * 写死旧下标会把别的列误藏（上一轮就出现过位置错位的教训）。
+           */
+          [9, 10],
         );
       const btn = (label: any, onClick: any, opts: any = {}) =>
         h(
@@ -1082,6 +833,74 @@ window.__ModuleLoader__.load({
           for (const m of a.catalog?.models ?? []) modelIds.add(m.id);
       const failedChannels = channels.filter((c: any) => c.error).length;
       const series = stats?.series ?? [];
+      /**
+       * 每日 × 渠道的交叉数据（宿主在 `stats.dailyByProvider` 给出）。
+       *
+       * ⚠️ 用户 2026-10-21 要求「每日 token 消耗按来源分别统计绘制」：
+       * 旧的 `series` 把所有渠道混成一根柱子，看不出是哪家吃掉了额度。
+       * 这里把它折成 `day → [{ provider, tokens }]`，用于画**堆叠柱**。
+       */
+      const dailyByProvider: any[] = Array.isArray(stats?.dailyByProvider)
+        ? stats.dailyByProvider
+        : [];
+      /**
+       * 渠道 → 颜色。
+       *
+       * 顺序取「该渠道在整个区间内的 Token 总量降序」，保证：
+       *  - 量大的渠道排在堆叠底部，视觉上更稳；
+       *  - 同一个渠道在每根柱子里颜色一致；
+       *  - 顺序不随日期或查询顺序抖动。
+       * 色板用固定序列循环，渠道多于色板时重复，但**相邻不会撞色**。
+       */
+      const providerTotals = new Map<string, number>();
+      for (const row of dailyByProvider)
+        providerTotals.set(
+          String(row.provider),
+          (providerTotals.get(String(row.provider)) ?? 0) +
+            (typeof row.totalTokens === "number" ? row.totalTokens : 0),
+        );
+      const dailyProviders: string[] = [...providerTotals.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([provider]) => provider);
+      /**
+       * 整个筛选区间的 Token 合计。
+       *
+       * ⚠️ 从 `dailyByProvider` 求和而不是另取一个字段：图例的各项之和必须
+       * 与「合计」逐字相等，否则用户按图例相加会对不上（实测两者与 KPI 的
+       * `totals.totalTokens` 完全一致）。
+       */
+      const dailyTotalTokens = [...providerTotals.values()].reduce(
+        (n, v) => n + v,
+        0,
+      );
+      const segmentColors = [
+        "#5785dd",
+        "#2f9e6b",
+        "#d6922f",
+        "#b47a2e",
+        "#d97757",
+        "#8b6be0",
+        "#4c8fd9",
+        "#2fa58a",
+        "#d35d8a",
+        "#6b6ef5",
+        "#c05a5a",
+        "#3a9bd9",
+      ];
+      const colorOfProvider = (provider: string) => {
+        const index = dailyProviders.indexOf(provider);
+        return segmentColors[(index < 0 ? 0 : index) % segmentColors.length];
+      };
+      /** 每天的各渠道分量（只保留 > 0 的，避免空段）。 */
+      const daySegments = (dayId: string) =>
+        dailyByProvider
+          .filter((row) => String(row.day) === dayId)
+          .map((row) => ({
+            provider: String(row.provider),
+            tokens:
+              typeof row.totalTokens === "number" ? row.totalTokens : 0,
+          }))
+          .filter((segment) => segment.tokens > 0);
       const maxTokens = Math.max(
         1,
         ...series.map((d: any) =>
@@ -1090,6 +909,8 @@ window.__ModuleLoader__.load({
       );
       return h(
         "main",
+        // 铺满宿主主区域并自带纵向滚动（见 `.chub` 的 `height:100%` 与
+        // `overflow-y:auto`）。这里不再有第二种布局形态。
         { className: "chub" },
         h("style", null, css),
         h(
@@ -1409,6 +1230,8 @@ window.__ModuleLoader__.load({
                             : "可导入"),
                       fmt(row.hiddenModels),
                     ]),
+                    // 「来源」与「账号」可能是长路径/长昵称。
+                    [0, 1],
                   ),
                   h(
                     "div",
@@ -1489,6 +1312,14 @@ window.__ModuleLoader__.load({
                     ),
                     c.error &&
                       h("p", { className: "chub-inline err" }, c.error),
+                    /**
+                     * 统计与操作合并在同一行：操作按钮靠右（`margin-left:auto`）。
+                     *
+                     * ⚠️ 别把 `.chub-chanacts` 再拆成独立一行 —— 卡片头部信息已经
+                     * 三行（标题 / 状态、统计、账号列表），按钮单独占一行会让
+                     * 每张卡在常见宽度下多出 30px 空白。窄到放不下时 flex-wrap
+                     * 会把按钮换到下一行，`margin-left:auto` 仍然靠右。
+                     */
                     h(
                       "div",
                       { className: "chub-chanmeta" },
@@ -1526,35 +1357,36 @@ window.__ModuleLoader__.load({
                             ? "目录 · " + ago(latest)
                             : "目录未更新",
                       ),
-                    ),
-                    h(
-                      "div",
-                      { className: "chub-chanacts" },
-                      c.id === "loomy"
-                        ? h(
-                            React.Fragment,
-                            null,
-                            btn("微信扫码登录", () => login(c.id, "wechat"), {
+                      h(
+                        "div",
+                        { className: "chub-chanacts" },
+                        c.id === "loomy"
+                          ? h(
+                              React.Fragment,
+                              null,
+                              btn("微信扫码登录", () => login(c.id, "wechat"), {
+                                kind: "primary",
+                                small: true,
+                                disabled:
+                                  busy || !!c.error || c.canLogin === false,
+                              }),
+                              btn("短信登录", () => login(c.id, "sms"), {
+                                small: true,
+                                disabled:
+                                  busy || !!c.error || c.canLogin === false,
+                              }),
+                            )
+                          : btn("添加账号", () => login(c.id), {
                               kind: "primary",
                               small: true,
                               disabled:
                                 busy || !!c.error || c.canLogin === false,
                             }),
-                            btn("短信登录", () => login(c.id, "sms"), {
-                              small: true,
-                              disabled:
-                                busy || !!c.error || c.canLogin === false,
-                            }),
-                          )
-                        : btn("添加账号", () => login(c.id), {
-                            kind: "primary",
-                            small: true,
-                            disabled: busy || !!c.error || c.canLogin === false,
-                          }),
-                      btn(
-                        "更新模型",
-                        () => action("models.refresh", { provider: c.id }),
-                        { small: true },
+                        btn(
+                          "更新模型",
+                          () => action("models.refresh", { provider: c.id }),
+                          { small: true },
+                        ),
                       ),
                     ),
                     smsLogin?.provider === c.id &&
@@ -2100,7 +1932,7 @@ window.__ModuleLoader__.load({
                         h(
                           "p",
                           null,
-                          "按本地自然日汇总；悬停柱形查看当天数值。",
+                          "柱形是每天各自的量；下方图例是该区间的合计。悬停可看当天与各来源数值。",
                         ),
                       ),
                       h(
@@ -2143,28 +1975,127 @@ window.__ModuleLoader__.load({
                                 Math.max(1, slot - 2),
                                 36,
                               );
-                              const height =
-                                ((day.totalTokens || 0) / maxTokens) * 108;
+                              const x = i * slot + (slot - width) / 2;
+                              const segments = daySegments(String(day.id));
+                              /*
+                               * 堆叠柱：把当天各渠道的 Token 自下而上叠起来。
+                               *
+                               * ⚠️ 高度按**整柱总量**换算（`maxTokens`），
+                               * 每段占总高的比例与该渠道的 Token 占比一致，
+                               * 所以柱高仍然可比、段长又能读出占比。
+                               *
+                               * ⚠️ 当天没有分渠道数据时（`dailyByProvider`
+                               * 缺失或全为 0），退回画一根整柱 —— 宁可少一层
+                               * 分解，也不要让已有数据凭空消失。
+                               */
+                              if (segments.length === 0) {
+                                const height =
+                                  ((day.totalTokens || 0) / maxTokens) * 108;
+                                return h(
+                                  "rect",
+                                  {
+                                    key: day.id,
+                                    x,
+                                    y: 118 - height,
+                                    width,
+                                    height,
+                                    rx: 3,
+                                    className: "chub-bar",
+                                    fill:
+                                      "color-mix(in srgb,var(--chub-accent) 68%,transparent)",
+                                  },
+                                  h(
+                                    "title",
+                                    null,
+                                    day.id +
+                                      " · " +
+                                      fmt(day.totalTokens) +
+                                      " Token · " +
+                                      fmt(day.requests) +
+                                      " 请求",
+                                  ),
+                                );
+                              }
+                              const sum = segments.reduce(
+                                (n, s) => n + s.tokens,
+                                0,
+                              );
+                              /**
+                               * 该柱的总高（按当天总量与全局峰值换算）。
+                               *
+                               * ⚠️ 用 `day.totalTokens || sum`：宿主给的日汇总
+                               * 与逐渠道分量理论上相等，但任一可能缺失；退到
+                               * 分量之和才不会把柱子画成 0。
+                               */
+                              const barHeight =
+                                ((day.totalTokens || sum) / maxTokens) * 108;
+                              /*
+                               * ⚠️ 最小可见高度 2px：真实数据里占比最小的
+                               * 渠道按纯比例只有 0.1px，是**看不见**的。用户看
+                               * 这张图就是为了找出「谁在用」，所以宁可轻微压缩
+                               * 大段，也要保证每个渠道都留有可见的一笔。
+                               */
+                              const heights = stackHeights(
+                                segments.map((s) => s.tokens),
+                                barHeight,
+                                2,
+                              );
+                              let cursor = 118;
                               return h(
-                                "rect",
-                                {
-                                  key: day.id,
-                                  x: i * slot + (slot - width) / 2,
-                                  y: 118 - height,
-                                  width,
-                                  height,
-                                  rx: 3,
-                                  className: "chub-bar",
-                                },
+                                "g",
+                                { key: day.id },
+                                ...segments.map((segment, k) => {
+                                  const part = heights[k] ?? 0;
+                                  cursor -= part;
+                                  const share =
+                                    sum > 0 ? segment.tokens / sum : 0;
+                                  return h(
+                                    "rect",
+                                    {
+                                      key: segment.provider,
+                                      x,
+                                      y: cursor,
+                                      width,
+                                      height: part,
+                                      // 只有最顶段做圆角，中间段紧贴。
+                                      rx: k === segments.length - 1 ? 3 : 0,
+                                      className: "chub-seg",
+                                      fill: colorOfProvider(segment.provider),
+                                    },
+                                    h(
+                                      "title",
+                                      null,
+                                      day.id +
+                                        " · " +
+                                        segment.provider +
+                                        " · " +
+                                        fmt(segment.tokens) +
+                                        " Token · 占当天 " +
+                                        pct(share),
+                                    ),
+                                  );
+                                }),
+                                // 整柱的汇总提示挂在透明覆盖层上，悬停空白也能看总量。
                                 h(
-                                  "title",
-                                  null,
-                                  day.id +
-                                    " · " +
-                                    fmt(day.totalTokens) +
-                                    " Token · " +
-                                    fmt(day.requests) +
-                                    " 请求",
+                                  "rect",
+                                  {
+                                    x,
+                                    y: 118 - ((day.totalTokens || 0) / maxTokens) * 108,
+                                    width,
+                                    height:
+                                      ((day.totalTokens || 0) / maxTokens) * 108,
+                                    fill: "transparent",
+                                  },
+                                  h(
+                                    "title",
+                                    null,
+                                    day.id +
+                                      " · 合计 " +
+                                      fmt(day.totalTokens) +
+                                      " Token · " +
+                                      fmt(day.requests) +
+                                      " 请求",
+                                  ),
                                 ),
                               );
                             }),
@@ -2210,25 +2141,115 @@ window.__ModuleLoader__.load({
                               });
                             })(),
                           ),
+                          /*
+                           * 图例：渠道 → 色块。
+                           *
+                           * ⚠️ 只在**真的有分渠道数据**时渲染：没有分渠道
+                           * 数据时柱子是单色的，再画一排图例会误导用户以为
+                           * 那些渠道都有独立分段。
+                           *
+                           * ⚠️ 图例数值是**整个筛选区间的合计**，而柱子是
+                           * **每日**的量 —— 两者量级天然不同（用户 2026-10-21
+                           * 指出过这个困惑）。故在开头显式写一行「合计」，
+                           * 并标明「区间合计」，让两套数字各自有明确口径。
+                           */
+                          dailyProviders.length > 0 &&
+                            h(
+                              "div",
+                              { className: "chub-legend" },
+                              h(
+                                "span",
+                                {
+                                  key: "__total",
+                                  className: "chub-legendtotal",
+                                  title:
+                                    series.length +
+                                    " 天的合计；柱形是每天各自的量",
+                                },
+                                "合计 ",
+                                h("b", null, fmt(dailyTotalTokens)),
+                                " Token · ",
+                                series.length + " 天",
+                              ),
+                              ...dailyProviders.map((provider) => {
+                                const value =
+                                  providerTotals.get(provider) ?? 0;
+                                return h(
+                                  "span",
+                                  {
+                                    key: provider,
+                                    className: "chub-legenditem",
+                                    title:
+                                      provider +
+                                      " · 区间内合计 " +
+                                      fmt(value) +
+                                      " Token" +
+                                      (dailyTotalTokens > 0
+                                        ? " · 占 " + pct(value / dailyTotalTokens)
+                                        : ""),
+                                  },
+                                  h("i", {
+                                    className: "chub-legenddot",
+                                    style: {
+                                      background: colorOfProvider(provider),
+                                    },
+                                  }),
+                                  h(
+                                    "span",
+                                    { className: "chub-legendname" },
+                                    provider,
+                                  ),
+                                  /*
+                                   * 图例带数值：柱子只有 108px 高，占比小的
+                                   * 渠道即便保住 2px 可见高度，也读不出具体
+                                   * 数字；把区间合计写在图例里，精确值就不必
+                                   * 逐根柱子悬停。
+                                   */
+                                  h(
+                                    "span",
+                                    { className: "chub-legendvalue" },
+                                    fmt(value),
+                                  ),
+                                );
+                              }),
+                            ),
                         ),
                     series.length > 0 &&
                       h(
                         "details",
                         { className: "chub-fold" },
                         h("summary", null, "查看每日明细"),
-                        table(
-                          ["日期", "Token", "请求"],
-                          series.map((s: any) => [
-                            s.id,
-                            fmt(s.totalTokens),
-                            fmt(s.requests),
-                          ]),
-                        ),
+                        /*
+                         * 明细表按**来源分行**：同一日期会出现在多行，
+                         * 各自对应一个渠道。这样「哪天是哪家消耗的」在表格里
+                         * 也能查到，不只靠柱子的颜色。
+                         *
+                         * 没有分渠道数据时退回按日期汇总的单行形态。
+                         */
+                        dailyByProvider.length > 0
+                          ? table(
+                              ["日期", "来源", "Token", "请求"],
+                              dailyByProvider.map((row: any) => [
+                                row.day,
+                                row.provider,
+                                fmt(row.totalTokens),
+                                fmt(row.requests),
+                              ]),
+                              [1],
+                            )
+                          : table(
+                              ["日期", "Token", "请求"],
+                              series.map((s: any) => [
+                                s.id,
+                                fmt(s.totalTokens),
+                                fmt(s.requests),
+                              ]),
+                            ),
                       ),
                   ),
                   h(
                     "div",
-                    { className: "chub-grid2" },
+                    { className: "chub-stack" },
                     ...["accounts", "models"].map((key) => {
                       const rows = stats[key] ?? [];
                       return h(
@@ -2268,7 +2289,7 @@ window.__ModuleLoader__.load({
                             )
                           : table(
                               [
-                                "名称",
+                                "来源 / 名称",
                                 "Token",
                                 "请求",
                                 "成功率",
@@ -2277,7 +2298,26 @@ window.__ModuleLoader__.load({
                                 "首字 ms",
                               ],
                               rows.map((s: any) => [
-                                s.name ?? s.id,
+                                /*
+                                 * 「来源 / 名称」两段式。
+                                 *
+                                 * ⚠️ `provider` 由宿主**结构化**给出（见
+                                 * `database.ts` 的 `accountStats` /
+                                 * `modelGroups`），不要在这里从 `name` 或
+                                 * `id` 里劈字符串 —— 账号显示名可能是任意
+                                 * 文本（含 `/`），劈出来的「来源」会错。
+                                 *
+                                 * 模型分组本身也改成 `渠道 + 模型` 了：同名模型
+                                 * 出现在多个渠道时（实测 deepseek-v4.1-flash
+                                 * 横跨 4 个渠道）不再被合并成一行。
+                                 */
+                                h(
+                                  "span",
+                                  { className: "chub-source" },
+                                  s.provider ?? "—",
+                                  h("span", { className: "chub-sep" }, " / "),
+                                  s.name ?? s.id,
+                                ),
                                 fmt(s.totalTokens),
                                 fmt(s.requests),
                                 pct(s.successRate),
@@ -2294,7 +2334,7 @@ window.__ModuleLoader__.load({
         tab === "logs" &&
           h(
             "div",
-            { className: "chub-body" },
+            { className: "chub-body chub-logs" },
             h(
               "section",
               { className: "chub-section" },
@@ -2328,18 +2368,81 @@ window.__ModuleLoader__.load({
           ),
       );
     }
+    /**
+     * 侧边栏面板 id。
+     *
+     * ⚠️ **必须与 `main` keyed slot 的 key 完全相同**：宿主用这个 id 把一个
+     * `sidebar.panellist` 图标与 `main` 里的面板页绑起来（见宿主文档
+     * 「Global panel entries」）。两者写得不一致时，图标点下去抛
+     * `selectPanel` 的「unknown panel」，页面根本打不开。
+     */
+    const PANEL_ID = "channel-hub";
+    /**
+     * 侧边栏图标。
+     *
+     * 契约（宿主文档）：`sidebar.panellist` 注册的是**图标组件**，点击由宿主
+     * 自己处理（它内部调用 `selectPanel(id)`），插件不需要 `layout` 服务。
+     * props 只有 `{ size, active }` —— `size` 跟随侧栏宽窄（16/18），
+     * `active` 表示当前是否停在这个面板上。
+     *
+     * ⚠️ 图标必须是**纯装饰**：宿主已提供 `aria-label`（来自 `label()`），
+     * 这里再加一次会让读屏软件念两遍。故 `aria-hidden`。
+     */
+    function ChannelHubIcon(props: any) {
+      const size = typeof props?.size === "number" ? props.size : 18;
+      return h(
+        "svg",
+        {
+          width: size,
+          height: size,
+          viewBox: "0 0 24 24",
+          fill: "none",
+          stroke: "currentColor",
+          strokeWidth: 1.8,
+          strokeLinecap: "round",
+          strokeLinejoin: "round",
+          "aria-hidden": "true",
+          focusable: "false",
+        },
+        // 三个叠放的通道条 + 一条脉冲线：表达「多个渠道 + 真实请求」。
+        h("rect", { x: 3, y: 4, width: 18, height: 4.5, rx: 1.5 }),
+        h("rect", { x: 3, y: 10.5, width: 11, height: 4.5, rx: 1.5 }),
+        h("rect", { x: 3, y: 17, width: 6, height: 3.5, rx: 1.5 }),
+        h("path", { d: "M17 12.5l2 2 3-3.5" }),
+      );
+    }
     return {
       name: "channel-hub",
+      id: "dsh-channel-hub",
       inject: ["slots", "connection"],
       apply(ctx: any) {
-        ctx.slots.inject("settings.section", () =>
+        ctx.slots.inject("sidebar.panellist", () =>
           ctx.slots.register(
             {
-              name: "settings.section",
-              id: "channel-hub",
+              name: "sidebar.panellist",
+              id: PANEL_ID,
               order: 35,
               label: () => "渠道中心",
             },
+            ChannelHubIcon,
+          ),
+        );
+        /**
+         * 整窗主区域（本插件**唯一**的入口）。
+         *
+         * ⚠️ 为什么不用 `settings.section`：宿主设置面板固定 800px，减去左导航
+         * 188px 与内容区左右各 24px，真实可用宽度只有约 564px；而本插件有三页、
+         * 含 7 列表格与双栏图表，挤在那里面只能横向滚动。`main` 面板是
+         * `width:100%;height:100%`，可以铺满窗口（实测同一 1560px 视口下
+         * 可用宽度 1560px vs 564px）。
+         *
+         * ⚠️ **不要**为了「让用户还能在设置里找到」再加一份 `settings.section`：
+         * 两个入口渲染的是同一个页面，多一处注册就多一处需要同步维护的入口，
+         * 而真正解决宽度问题的是这里。侧边栏图标是它唯一的发现路径。
+         */
+        ctx.slots.inject("main", () =>
+          ctx.slots.register(
+            { name: "main", key: PANEL_ID },
             (props: any) => h(Page, { ...props, ctx }),
           ),
         );

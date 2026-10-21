@@ -600,16 +600,18 @@ export class GeminiAdapter extends LlmAdapter {
           project,
           requestId: newGeminiRequestId(),
           ...images === undefined ? {} : { images },
-          ...droppedSignatures || sigStore === undefined
-            ? {}
-            : {
-              lookupSignature: (name: string, argsJson: string) => {
-                // 精确键（工具名 + 逐字参数）优先；miss 时回退到「该工具名最近一次
-                // 签名」。参数漂移（路径/时间戳变化）在长任务里是必然事件，没有
-                // 这层回退就只能走去签重试，而那条路会把整条思考链丢掉。
-                return sigStore.get(name, argsJson) ?? sigStore.latestForTool(name)
-              },
-            },
+          // ⚠️ **始终**提供查表回调（哪怕 `sigStore` 缺失）：上游强制要求本轮
+          // 每个 step 的首个 `functionCall` 带 `thoughtSignature`，缺失即 400。
+          // 查不到真签名时信封层会填 {@link GEMINI_SKIP_SIGNATURE}（上游文档
+          // 明示的跳过校验哨兵），而不是干脆不带签名 —— 后者等于必然失败。
+          lookupSignature: (name: string, argsJson: string) => {
+            // `droppedSignatures` = 真签名被上游拒过一次 ⇒ 本轮一律改发哨兵。
+            if (droppedSignatures || sigStore === undefined) return ''
+            // 精确键（工具名 + 逐字参数）优先；miss 时回退到「该工具名最近一次
+            // 签名」。参数漂移（路径/时间戳变化）在长任务里是必然事件，没有
+            // 这层回退就只能发哨兵，而那条路会丢掉整条思考链。
+            return sigStore.get(name, argsJson) ?? sigStore.latestForTool(name) ?? ''
+          },
         })
 
         const url = `${GEMINI_ENDPOINTS[endpointIdx] ?? GEMINI_ENDPOINTS[0]}${GEMINI_STREAM_PATH}`

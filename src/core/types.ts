@@ -79,14 +79,86 @@ export interface Logger {
   warn(message: string): void;
   info?(message: string): void;
 }
+/**
+ * 把任意抛出物整理成一句可读、已脱敏的短文本。
+ *
+ * ## 为什么要处理非 `Error`
+ *
+ * **真实缺陷（2026-10-21，运行日志自查）**：多处 `outcome:"cancelled"` 的
+ * `error` 是字面量 `"[object Object]"`。根因是宿主把中断归类成
+ * `{type:'finish', reason:{kind:'aborted', failure:{message, code}}}` 这样的
+ * **普通对象**，而本函数旧实现只认 `error.message` —— 一旦上游把对象本身
+ * 传进来（而不是它的 `message`），`String(obj)` 就得到 `[object Object]`。
+ * 用户因此看不懂发生了什么，排查也无从下手。
+ *
+ * 取值顺序：`Error.message` → 对象自带的 `message` / `msg` / `error` /
+ * `reason` → JSON（截断）→ `String()`。**任何一步都不抛**（宿主可能传入
+ * 带陷阱的代理对象）。
+ */
 export function redact(error: unknown): string {
-  return String(error instanceof Error ? error.message : error)
+  const text = describeThrown(error)
     .replace(/Bearer\s+[^\s"']+/gi, "Bearer [REDACTED]")
     .replace(
       /((?:access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|cookie)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
       "$1[REDACTED]",
     )
-    .slice(0, 1600);
+    .trim();
+  // 全部取值方式都失败时给一句可行动的话，而不是空串或 `[object Object]`。
+  return (text.length > 0 ? text : "未知错误（抛出物不可读）").slice(0, 1600);
+}
+
+/** {@link redact} 的取值链；只负责"读出人话"，不做脱敏。 */
+function describeThrown(error: unknown): string {
+  if (error instanceof Error) {
+    // `AbortError` 的 message 是 `This operation was aborted` —— 单独点明
+    // 语义，否则用户会以为这是上游故障（它其实是"这次请求被取消了"）。
+    const message = error.message;
+    if (error.name === "AbortError")
+      return message.length > 0 ? "请求已取消：" + message : "请求已取消";
+    if (error.name === "TimeoutError")
+      return message.length > 0 ? "请求超时：" + message : "请求超时";
+    return message;
+  }
+  if (typeof error === "string") return error;
+  if (typeof error === "number" || typeof error === "boolean")
+    return String(error);
+  if (error === null || error === undefined) return "";
+  try {
+    const record = error as Record<string, unknown>;
+    for (const key of ["message", "msg", "error", "detail"] as const) {
+      const value = record[key];
+      // 只认字符串叶子：嵌套对象交给下面的递归/ JSON 分支，
+      // 逐层展开会把一句原因拼成一长串。
+      if (typeof value === "string" && value.trim().length > 0)
+        return value.trim();
+    }
+    // `reason` / `cause` 常包装一个真正的 Error（如 `{reason: DOMException}`）：
+    // 递归一层取它的 message，否则会落到 JSON 变成一个 `{}`。
+    for (const key of ["reason", "cause", "failure"] as const) {
+      const value = record[key];
+      if (value instanceof Error) return describeThrown(value);
+      if (typeof value === "string" && value.trim().length > 0)
+        return value.trim();
+      if (typeof value === "object" && value !== null) {
+        const nested = describeThrown(value);
+        if (nested.length > 0) return nested;
+      }
+    }
+    // 折叠成一句：换行会让日志表按行错位。
+    const json = JSON.stringify(error)?.replace(/\s+/g, " ").slice(0, 400) ?? "";
+    if (json.length > 0 && json !== "{}") return json;
+  } catch {
+    // 循环引用 / 带陷阱的代理：JSON 序列化失败。
+  }
+  // ⚠️ 最后才试 `String()`，且**必须滤掉 `[object Object]`**：那正是本次要修
+  // 的症状（循环引用对象走 String() 就得到它）。滤掉后 `redact` 会给出
+  // 「未知错误（抛出物不可读）」，比一个无法排查的字面量有意义。
+  try {
+    const text = String(error);
+    return text === "[object Object]" ? "" : text;
+  } catch {
+    return "";
+  }
 }
 export function dayOf(ts: number): string {
   return new Date(ts + 8 * 3600000).toISOString().slice(0, 10);

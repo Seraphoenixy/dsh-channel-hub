@@ -24,14 +24,14 @@
         "src/credits.ts": "3dac076bc8e3561813eef2f5f3a3436aa3efa38bd8e9d3d7282ecf7eb956bd5a",
         "src/dead-model-store.ts": "d5c330a0d8843b8f6beb53dbf4968742f087eca512a108e24a64ddc450d249eb",
         "src/expiry-sync.ts": "38df3ddd7500839ef99f925067c40e0c2dddc8df266310c072adf30b8460349a",
-        "src/gemini-adapter.ts": "b75dd3c985025626818bd0e1782c06d9a134482e3a55d05311ee47e809803aaf",
+        "src/gemini-adapter.ts": "a455789cae8a1b622597e7de744bf3c7e483d2e28581192949458794101bdc21",
         "src/gemini-auth.ts": "b71dd1d1b7864d6f9ae9117928188d25028f0465dbc71d5019cfd0aaffccc217",
         "src/gemini-credits.ts": "e38bd3090c547393d573b4c78d08316409e83fde7885a943025abc3c80424b35",
-        "src/gemini-messages.ts": "acf7ed03439235a139c3ea7c9f2dd31b81737e3865b63c35cf63f21fe1446163",
+        "src/gemini-messages.ts": "10cff3d436a7e6653dfeb3b4caa262447d6ca5710d287a65bfcdd05c692dbb70",
         "src/gemini-oauth.ts": "94a59fbfb3ad54f56ac835ada66d5e74d5b1e49fbc0aafadb3d17eb0d9aafeff",
         "src/gemini-project.ts": "95abca9859ac9a043c06259e323572e73b3fa118f9bfe2278f9c321a6b7b3052",
         "src/gemini-sigstore.ts": "9bc7840b1fb010843a9f4cfddf7e8ed2aa5b90e39631ee28713cd36c2edca945",
-        "src/gemini.ts": "58837638b9ac3312d66342d26cab4570658cf6fce80f79f972695b4d29f1d6bf",
+        "src/gemini.ts": "a099652424609aa6701fe795b44a52eb11703d8cf0cb27d32cf294b3037683a7",
         "src/image-budget.ts": "c4da8f48a62ddf16669f443119c88f4789c76b88737dcfd887c78deccc7e9107",
         "src/index.ts": "18027e30bb98a1a3784d9e7060b8846b0f4b6da9c71398fb782ddd054bcd31cf",
         "src/llm-adapter.ts": "e5d230a4a7641ecb5cad5dca219114ec4b6a5dbb7b200ec54cac4cca88ceb9c3",
@@ -142,6 +142,7 @@
     }
   ],
   "adaptations": [
+    "LobsterAI credits: locally adapted vendor/ofm/src/lobsterai-credits.ts from the pinned OFM source to accept an explicit zero total with empty creditItems after exhaustion, while retaining failure for missing or invalid totals; synthetic regression tests only",
     "Auth service names and credential references isolated",
     "Per-profile cache paths",
     "Trae per-account model cache",
@@ -151,6 +152,7 @@
     "Buddy direct system fingerprint compatibility; Harness identity sentence verified with authorized live Buddy hy3 replay on 2026-10-21 (see docs/ACCEPTANCE.md)",
     "Trae cache usage counters forwarded without double counting; live repeated synthetic prompt verified on 2026-10-21",
     "Qoder account name discovery and username fallback adapted from Connect userinfo, preserving custom labels and credential identity",
-    "Background per-account check-in status follows Connect semantics and OFM coversToday exclusions; Qoder pre-refresh inactive explicitly does not cover today"
+    "Background per-account check-in status follows Connect semantics and OFM coversToday exclusions; Qoder pre-refresh inactive explicitly does not cover today",
+    "Gemini thoughtSignature round-trip repaired for Gemini 3/4 validation: signature cache wired into the channel driver (previously never constructed, so every tool turn was sent unsigned and rejected with 400), signatures carried on thought parts attributed to the next functionCall, and the documented skip_thought_signature_validator sentinel used only for the first functionCall of the current turn when no real signature is cached"
   ]
 }

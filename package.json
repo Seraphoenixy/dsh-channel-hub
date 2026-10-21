@@ -31,7 +31,7 @@
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test && npm run test:errors && npm run build && npm run test:client && npm run test:host && npm run test:package",
     "test:client": "node --test tests/client.test.mjs",
-    "test:errors": "node --import ./tests/resolve-vendor.mjs --test --experimental-transform-types tests/qoder-errors.test.mjs tests/buddy-errors.test.mjs tests/trae-cache.test.mjs tests/loomy-raccoon-credits.test.mjs",
+    "test:errors": "node --import ./tests/resolve-vendor.mjs --test --experimental-transform-types tests/qoder-errors.test.mjs tests/buddy-errors.test.mjs tests/trae-cache.test.mjs tests/loomy-raccoon-credits.test.mjs tests/gemini-signature.test.mjs tests/gemini-sigstore.test.mjs",
     "test:host": "node scripts/verify-host.mjs",
     "pack:local": "node scripts/pack.mjs",
     "format": "prettier --write \"src/**/*.ts\" \"src/drivers/*.js\" \"tests/*\" \"scripts/*.mjs\"",

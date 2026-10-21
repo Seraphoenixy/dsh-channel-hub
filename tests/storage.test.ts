@@ -158,6 +158,139 @@ test("统计过滤下推后口径不变（日期 / 渠道 / 模型 / 账号）",
   }
 });
 
+test("同一模型名跨渠道时按渠道分开统计，并回传来源字段", () => {
+  // 真实缺陷（2026-10-21，用户要求「名称列体现来源」时发现）：旧实现只按
+  // 模型名分组，而同一模型名会出现在多个渠道上 —— 实测 deepseek-v4.1-flash
+  // 横跨 workbuddy / trae / codearts / buddy 四个渠道，合并后速度被算成
+  // 一个平均值，无法判断「是哪个渠道慢」。
+  const db = new LedgerDatabase(":memory:");
+  const add = (id: string, provider: string, model: string, accountId: string, started: number) => {
+    const req = {
+      id,
+      turnId: id,
+      provider,
+      model,
+      started,
+      outcome: "running" as const,
+    };
+    db.begin(req);
+    db.finish({ ...req, outcome: "success", ended: started + 1000 }, [
+      {
+        id: "at-" + id,
+        requestId: id,
+        provider,
+        model,
+        accountId,
+        started,
+        ended: started + 1000,
+        outcome: "success",
+        usage: { input: 5, output: 10 },
+      },
+    ]);
+  };
+  try {
+    const at = Date.parse("2026-10-21T10:00:00+08:00");
+    // 同一个模型名挂在两个渠道上。
+    add("m1", "buddy", "shared-model", "acc1", at);
+    add("m2", "trae", "shared-model", "acc2", at + 1000);
+
+    const all = db.stats({});
+    assert.equal(
+      all.models.length,
+      2,
+      "同名模型在两个渠道上必须是两行，不能被合并",
+    );
+    assert.deepEqual(
+      all.models.map((m: any) => m.id).sort(),
+      ["buddy/shared-model", "trae/shared-model"],
+    );
+    // 每个分组都带回结构化的来源与裸模型名，界面才能拼「来源 / 名称」。
+    for (const row of all.models) {
+      assert.ok(row.provider === "buddy" || row.provider === "trae", String(row.provider));
+      assert.equal(row.model, "shared-model");
+    }
+    // 账号分组同样带上来源与账号 id。
+    for (const row of all.accounts) {
+      assert.equal(typeof row.provider, "string");
+      assert.equal(typeof row.accountId, "string");
+      assert.equal(row.id, row.provider + "/" + row.accountId);
+    }
+  } finally {
+    db.close();
+  }
+});
+
+test("每日消耗按来源分别统计，且排序稳定", () => {
+  // 用户 2026-10-21 要求「每日 token 消耗按来源分别统计绘制」：
+  // 旧的 series 只按日期分组，所有渠道混成一根柱子，看不出是哪家吃掉了额度。
+  const db = new LedgerDatabase(":memory:");
+  const add = (
+    id: string,
+    provider: string,
+    started: number,
+    output: number,
+  ) => {
+    const req = {
+      id,
+      turnId: id,
+      provider,
+      model: "m",
+      started,
+      outcome: "running" as const,
+    };
+    db.begin(req);
+    db.finish({ ...req, outcome: "success", ended: started + 1000 }, [
+      {
+        id: "at-" + id,
+        requestId: id,
+        provider,
+        model: "m",
+        accountId: "acc",
+        started,
+        ended: started + 1000,
+        outcome: "success",
+        usage: { input: 0, output },
+      },
+    ]);
+  };
+  try {
+    const d20 = Date.parse("2026-10-20T10:00:00+08:00");
+    const d21 = Date.parse("2026-10-21T10:00:00+08:00");
+    // 10-20：buddy 多、trae 少；10-21：trae 多（跨天换主力渠道）。
+    add("a", "buddy", d20, 100);
+    add("b", "trae", d20 + 1000, 10);
+    add("c", "trae", d21, 800);
+    add("d", "buddy", d21 + 1000, 20);
+
+    const rows = db.stats({}).dailyByProvider as any[];
+    assert.equal(rows.length, 4, "两天 × 两个渠道 = 四行");
+    // 按日期升序，便于界面直接按天分组。
+    assert.deepEqual(
+      rows.map((r) => r.day),
+      ["2026-10-20", "2026-10-20", "2026-10-21", "2026-10-21"],
+    );
+    // 同一天内按 Token 降序 —— 堆叠顺序与图例顺序都由它决定，必须稳定。
+    assert.deepEqual(
+      rows.map((r) => r.provider),
+      ["buddy", "trae", "trae", "buddy"],
+    );
+    assert.deepEqual(
+      rows.map((r) => r.totalTokens),
+      [100, 10, 800, 20],
+    );
+    // 每天各渠道之和应等于当日汇总，两者不能对不上。
+    const series = db.stats({}).series as any[];
+    for (const day of series) {
+      const sum = rows
+        .filter((r) => r.day === day.id)
+        .reduce((n, r) => n + r.totalTokens, 0);
+      assert.equal(sum, day.totalTokens, day.id + " 的分渠道之和必须等于当日汇总");
+    }
+  } finally {
+    db.close();
+  }
+});
+
 test("落库时 attempt 未定稿也写入速度样本（daily 不再恒为 0）", () => {
   const db = new LedgerDatabase(":memory:");
   try {

@@ -1,0 +1,588 @@
+.chub{
+  --chub-text:var(--dsw-alias-label-primary,var(--text-primary,inherit));
+  --chub-text-2:var(--dsw-alias-label-secondary,#6b7280);
+  --chub-text-3:var(--dsw-alias-label-tertiary,#9ca3af);
+  --chub-line:var(--dsw-alias-border-l2,rgba(128,128,128,.28));
+  --chub-line-soft:var(--dsw-alias-border-l1,rgba(128,128,128,.16));
+  --chub-layer-1:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.06));
+  --chub-layer-2:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.09));
+  --chub-layer-3:var(--dsw-alias-bg-layer-3,rgba(127,127,127,.13));
+  --chub-accent:var(--dsw-alias-state-business-primary,#5785dd);
+  --chub-ok:var(--dsw-alias-state-success-primary,#2f9e6b);
+  --chub-warn:var(--dsw-alias-state-warning-primary,#d6922f);
+  --chub-err:var(--dsw-alias-state-error-primary,#d55b5b);
+  display:flex;
+  flex-direction:column;
+  gap:16px;
+  width:100%;
+  box-sizing:border-box;
+  color:var(--chub-text);
+  font-size:15px;
+  line-height:1.55;
+  /*
+   * 铺满宿主的整窗主区域（main keyed slot）。
+   *
+   * 布局契约：**页面本身不滚动**，只有内容区（.chub-body）滚动。
+   * 概览头与页签常驻可见，与宿主自己的插件管理 / 任务管理页一致。
+   *
+   * ⚠️ 必须 min-width/min-height:0：宿主主区域是 flex 项，少这两条会让内部
+   * 表格把整个窗口撑出滚动条，而不是在自己的容器里滚。
+   *
+   * ⚠️ overflow:hidden 而不是 auto：外层一旦可滚，内容区的 flex:1 高度就会
+   * 失效（内容会把容器撑高、整页一起滚走），页签不再固定。
+   */
+  min-width:0;
+  min-height:0;
+  height:100%;
+  padding:0 clamp(16px,2.4vw,40px) 0;
+  overflow:hidden;
+}
+.chub *{box-sizing:border-box}
+.chub ::selection{background:color-mix(in srgb,var(--chub-accent) 30%,transparent)}
+.chub h2,.chub h3,.chub h4,.chub p{margin:0}
+.chub h2{font-size:27px;line-height:1.2;font-weight:760;letter-spacing:-.02em}
+.chub h3{font-size:16px;line-height:1.35;font-weight:680}
+.chub h4{font-size:14.5px;line-height:1.4;font-weight:660}
+.chub a{color:var(--chub-accent);text-decoration:none}
+.chub a:hover{text-decoration:underline}
+.chub :focus-visible{outline:2px solid color-mix(in srgb,var(--chub-accent) 72%,transparent);outline-offset:2px}
+/**
+ * 概览头：**紧凑单行**结构。
+ *
+ * 设计取向（用户 2026-10-21 拍板）：这一条是常驻的导航性区域，不该占掉
+ * 整屏高度的十分之一 —— 它压扁后更好看，而真正的内容留给下面的渠道卡片、
+ * 图表与日志表。故标题、说明、状态胶囊、四个小指标全部收进约 90px 高。
+ *
+ * ⚠️ 只压**这一块**，不要压缩页面其它部分：正文按真实可用空间自然展开。
+ */
+.chub-hero{
+  position:relative;
+  display:flex;
+  flex-direction:column;
+  gap:9px;
+  flex:none;
+  padding:12px 16px 11px;
+  overflow:hidden;
+  border:1px solid var(--chub-line-soft);
+  border-radius:13px;
+  background:
+    radial-gradient(120% 160% at 100% 0%,color-mix(in srgb,var(--chub-accent) 14%,transparent),transparent 58%),
+    linear-gradient(165deg,var(--chub-layer-2),var(--chub-layer-1));
+  box-shadow:inset 0 1px 0 color-mix(in srgb,#fff 8%,transparent);
+}
+.chub-hero::after{
+  content:"";
+  position:absolute;
+  right:-90px;
+  top:-110px;
+  width:210px;
+  height:210px;
+  border-radius:50%;
+  border:1px solid color-mix(in srgb,var(--chub-accent) 22%,transparent);
+  pointer-events:none;
+}
+.chub-pagehead{display:flex;align-items:center;gap:14px;flex-wrap:wrap;position:relative;z-index:1}
+.chub-headline{display:flex;align-items:baseline;gap:9px;min-width:0;flex:1 1 420px;flex-wrap:wrap}
+.chub-eyebrow{font-size:11px;line-height:1.4;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--chub-accent)}
+/* 压扁后标题与说明同排：说明只保留一句，超出宽度省略而不是换行撑高。 */
+.chub-headline h2{font-size:19px;line-height:1.25}
+.chub-sub{
+  margin:0;
+  min-width:0;
+  flex:1 1 260px;
+  font-size:12.5px;
+  line-height:1.45;
+  color:var(--chub-text-2);
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.chub-pills{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-left:auto}
+.chub-pill{
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  padding:2px 8px;
+  border:1px solid var(--chub-line-soft);
+  border-radius:999px;
+  background:color-mix(in srgb,var(--chub-layer-2) 78%,transparent);
+  color:var(--chub-text-2);
+  font-size:11.5px;
+  line-height:1.5;
+  font-weight:560;
+  white-space:nowrap;
+}
+.chub-dot{width:5px;height:5px;border-radius:50%;background:var(--chub-text-3);flex:none}
+.chub-pill.ok{color:var(--chub-ok);border-color:color-mix(in srgb,var(--chub-ok) 28%,transparent);background:color-mix(in srgb,var(--chub-ok) 8%,transparent)}
+.chub-pill.ok .chub-dot{background:var(--chub-ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--chub-ok) 14%,transparent)}
+.chub-pill.err{color:var(--chub-err);border-color:color-mix(in srgb,var(--chub-err) 30%,transparent);background:color-mix(in srgb,var(--chub-err) 8%,transparent)}
+.chub-pill.err .chub-dot{background:var(--chub-err)}
+/**
+ * 四个小指标压成一条窄带。
+ *
+ * ⚠️ auto-fit 而不是固定 4 列：窄窗口下自动折行，不会把数字挤成两行。
+ * 数值用 tabular-nums 保证抖动时宽度稳定。
+ */
+.chub-ministats{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px;position:relative;z-index:1}
+.chub-mini{display:flex;align-items:baseline;gap:6px;min-width:0;padding:4px 9px;border:1px solid var(--chub-line-soft);border-radius:9px;background:color-mix(in srgb,var(--chub-layer-1) 76%,transparent)}
+.chub-mini span{flex:none;font-size:10.5px;line-height:1.4;font-weight:650;letter-spacing:.06em;text-transform:uppercase;color:var(--chub-text-3)}
+.chub-mini b{flex:none;font-size:15px;line-height:1.3;font-weight:700;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.chub-mini i{flex:1 1 auto;min-width:0;font-style:normal;font-size:11px;line-height:1.4;color:var(--chub-text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chub-navbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:none}
+.chub-tabs{display:inline-flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--chub-line-soft);border-radius:10px;background:var(--chub-layer-1)}
+.chub-tabs button{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:6px;
+  border:0;
+  border-radius:7px;
+  padding:5px 11px;
+  background:transparent;
+  color:var(--chub-text-2);
+  font:inherit;
+  font-size:13px;
+  font-weight:600;
+  line-height:1.5;
+  cursor:pointer;
+  transition:background .16s ease,color .16s ease,box-shadow .16s ease;
+  white-space:nowrap;
+}
+.chub-tabs button:hover{background:color-mix(in srgb,var(--chub-layer-2) 82%,transparent);color:var(--chub-text)}
+.chub-tabs button[aria-current=page]{background:var(--chub-layer-3);color:var(--chub-text);box-shadow:inset 0 1px 0 color-mix(in srgb,#fff 10%,transparent),0 1px 2px rgba(0,0,0,.08)}
+.chub-tabcount{font-style:normal;font-size:11px;line-height:1;padding:2px 5px;border-radius:999px;background:color-mix(in srgb,var(--chub-accent) 14%,transparent);color:var(--chub-accent);font-variant-numeric:tabular-nums}
+.chub-navacts{display:flex;align-items:center;gap:8px;margin-left:auto}
+.chub-hint{font-size:12px;color:var(--chub-text-3);white-space:nowrap}
+.chub-btn{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:5px;
+  border:1px solid var(--chub-line);
+  border-radius:9px;
+  padding:6px 11px;
+  background:var(--chub-layer-2);
+  color:var(--chub-text);
+  font:inherit;
+  font-size:14px;
+  font-weight:560;
+  line-height:1.5;
+  cursor:pointer;
+  white-space:nowrap;
+  transition:background .16s ease,border-color .16s ease,color .16s ease,transform .16s ease;
+}
+.chub-btn:hover:not(:disabled){background:var(--chub-layer-3);border-color:color-mix(in srgb,var(--chub-accent) 38%,var(--chub-line))}
+.chub-btn:active:not(:disabled){transform:translateY(1px)}
+.chub-btn.primary{border-color:color-mix(in srgb,var(--chub-accent) 36%,var(--chub-line));background:color-mix(in srgb,var(--chub-accent) 13%,var(--chub-layer-1));color:var(--chub-accent)}
+.chub-btn.primary:hover:not(:disabled){background:color-mix(in srgb,var(--chub-accent) 20%,var(--chub-layer-1))}
+.chub-btn.ghost{border-color:transparent;background:transparent;color:var(--chub-text-2)}
+.chub-btn.ghost:hover:not(:disabled){border-color:var(--chub-line-soft);background:var(--chub-layer-1);color:var(--chub-text)}
+.chub-btn.danger{color:var(--chub-err)}
+.chub-btn.danger:hover:not(:disabled){border-color:color-mix(in srgb,var(--chub-err) 36%,var(--chub-line));background:color-mix(in srgb,var(--chub-err) 10%,transparent)}
+.chub-btn.small{padding:3px 8px;border-radius:7px;font-size:12.5px;font-weight:560}
+.chub-btn:disabled{opacity:.42;cursor:not-allowed}
+.chub-alert{display:flex;flex-direction:column;gap:3px;padding:10px 13px;border:1px solid var(--chub-line);border-radius:12px;background:var(--chub-layer-1)}
+.chub-alert b{font-size:14px;line-height:1.5;font-weight:650}
+.chub-alert p{margin:0;font-size:13.5px;line-height:1.65;color:var(--chub-text-2);overflow-wrap:anywhere}
+.chub-alert a{font-size:13.5px;font-weight:600;align-self:flex-start}
+.chub-alert code{padding:1px 5px;border-radius:5px;background:var(--chub-layer-2);font-size:13px}
+.chub-alert.err{border-color:color-mix(in srgb,var(--chub-err) 32%,transparent);background:color-mix(in srgb,var(--chub-err) 7%,var(--chub-layer-1))}
+.chub-alert.err b{color:var(--chub-err)}
+.chub-alert.info{border-color:color-mix(in srgb,var(--chub-accent) 32%,transparent);background:color-mix(in srgb,var(--chub-accent) 7%,var(--chub-layer-1))}
+.chub-alert.info b{color:var(--chub-accent)}
+.chub-filters{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border:1px solid var(--chub-line-soft);border-radius:13px;background:var(--chub-layer-1)}
+.chub-filterhead{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.chub-filterhead b{font-size:13.5px;font-weight:650}
+.chub-filterhead span{font-size:12.5px;color:var(--chub-text-3)}
+.chub-filterrow{display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap}
+.chub-field{display:flex;flex-direction:column;gap:3px;flex:1 1 148px;min-width:0}
+.chub-field.grow{flex:2 1 210px}
+.chub-field>span{font-size:11.5px;line-height:1.4;font-weight:650;letter-spacing:.06em;text-transform:uppercase;color:var(--chub-text-3)}
+.chub-field select,.chub-field input{width:100%;min-width:0;padding:5px 8px;border:1px solid var(--chub-line);border-radius:8px;background:var(--chub-layer-2);color:var(--chub-text);font:inherit;font-size:13.5px;line-height:1.5}
+.chub-field input::placeholder{color:var(--chub-text-3)}
+/* 页面里唯一可滚动的区域。概览头与页签留在滚动容器之外，常驻可见。 */
+.chub-body{
+  display:flex;
+  flex-direction:column;
+  gap:14px;
+  min-height:0;
+  flex:1 1 auto;
+  padding-bottom:24px;
+  overflow-y:auto;
+  overflow-x:hidden;
+  scrollbar-gutter:stable;
+  animation:chub-in .28s ease both;
+}
+.chub-section{display:flex;flex-direction:column;gap:10px;min-width:0}
+.chub-sectionhead{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--chub-line-soft)}
+.chub-sectionhead>div:first-child{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 320px}
+.chub-sectionhint{margin:0;font-size:13px;line-height:1.6;color:var(--chub-text-3)}
+.chub-sectools{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.chub-channels{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px;align-items:start}
+.chub-channel{
+  --chan-accent:var(--chub-accent);
+  position:relative;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  min-width:0;
+  padding:15px 16px 13px;
+  overflow:hidden;
+  border:1px solid var(--chub-line-soft);
+  border-radius:15px;
+  background:linear-gradient(160deg,var(--chub-layer-2),var(--chub-layer-1));
+  transition:border-color .18s ease,transform .18s ease,box-shadow .18s ease;
+}
+.chub-channel::before{content:"";position:absolute;inset:0 0 auto;height:2px;background:linear-gradient(90deg,var(--chan-accent),transparent 76%);opacity:.72}
+.chub-channel[data-state=idle]::before{background:linear-gradient(90deg,var(--chub-warn),transparent 76%)}
+.chub-channel[data-state=err]::before{background:linear-gradient(90deg,var(--chub-err),transparent 76%)}
+.chub-channel[data-state=off]::before{background:linear-gradient(90deg,var(--chub-text-3),transparent 76%)}
+.chub-chanhead{display:flex;align-items:center;gap:9px;min-width:0}
+.chub-chanlogo{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:32px;
+  height:32px;
+  flex:none;
+  border-radius:10px;
+  background:linear-gradient(145deg,color-mix(in srgb,var(--chan-accent) 82%,#fff),color-mix(in srgb,var(--chan-accent) 54%,#07111f));
+  color:#fff;
+  font-size:12.5px;
+  font-weight:760;
+  letter-spacing:.02em;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.24),0 4px 10px color-mix(in srgb,var(--chan-accent) 18%,transparent);
+}
+.chub-chanid{display:flex;flex-direction:column;gap:0;min-width:0;flex:1}
+.chub-chanid b{font-size:15px;line-height:1.45;font-weight:680;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chub-chanid span{font-size:12px;line-height:1.45;color:var(--chub-text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chub-chanstate{display:inline-flex;align-items:center;gap:4px;flex:none;padding:2px 7px;border:1px solid var(--chub-line-soft);border-radius:999px;color:var(--chub-text-3);font-size:11.5px;font-weight:600;line-height:1.5;white-space:nowrap}
+.chub-chanstate::before{content:"";width:4px;height:4px;border-radius:50%;background:currentColor}
+.chub-channel[data-state=on] .chub-chanstate{color:var(--chub-ok);border-color:color-mix(in srgb,var(--chub-ok) 26%,transparent);background:color-mix(in srgb,var(--chub-ok) 7%,transparent)}
+.chub-channel[data-state=idle] .chub-chanstate{color:var(--chub-warn);border-color:color-mix(in srgb,var(--chub-warn) 26%,transparent);background:color-mix(in srgb,var(--chub-warn) 7%,transparent)}
+.chub-channel[data-state=err] .chub-chanstate{color:var(--chub-err);border-color:color-mix(in srgb,var(--chub-err) 28%,transparent);background:color-mix(in srgb,var(--chub-err) 7%,transparent)}
+/**
+ * 卡片统计行：文字在左，操作按钮靠右。
+ *
+ * ⚠️ 按钮组用 `margin-left:auto` 右推而不是 `justify-content:space-between`：
+ * 统计项数量是变的（`目录` 那项在没更新时会变成一句「目录未更新」），
+ * space-between 会把三处空隙均分，按钮位置随内容跳动；auto 外边距只吃
+ * 剩余空间，按钮永远贴着右边缘。换行时（窄卡片）auto 外边距仍然生效，
+ * 落到第二行也靠右，不会缩回左边。
+ */
+.chub-chanmeta{display:flex;align-items:center;gap:4px 9px;flex-wrap:wrap;padding:5px 0 1px;border-top:1px dashed var(--chub-line-soft);font-size:12px;line-height:1.5;color:var(--chub-text-3)}
+.chub-chanmeta b{font-weight:650;color:var(--chub-text-2);font-variant-numeric:tabular-nums}
+.chub-chanmeta .warn{color:var(--chub-warn)}
+/**
+ * `flex:none`（不可压缩）是有意的：允许它收缩会让两个按钮依次折行成竖排，
+ * 比整块换到第二行更难看。它换行时 `margin-left:auto` 仍把它推到右边缘。
+ */
+.chub-chanmeta>.chub-chanacts{margin-left:auto;flex:none}
+.chub-chanacts{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.chub-smsform{display:flex;flex-direction:column;gap:7px;padding:10px 11px;border:1px solid var(--chub-line-soft);border-radius:12px;background:var(--chub-layer-1)}
+.chub-smsform .chub-smsfields{display:flex;gap:8px;flex-wrap:wrap}
+.chub-smsform .chub-field{flex:1 1 132px}
+.chub-acctlist{display:flex;flex-direction:column;gap:7px}
+.chub-acct{
+  display:flex;
+  flex-direction:column;
+  gap:7px;
+  min-width:0;
+  padding:9px 10px;
+  border:1px solid var(--chub-line-soft);
+  border-radius:11px;
+  background:color-mix(in srgb,var(--chub-layer-1) 82%,transparent);
+}
+.chub-acct:has(input:focus-visible){border-color:color-mix(in srgb,var(--chub-accent) 48%,var(--chub-line))}
+.chub-accthead{display:flex;align-items:center;gap:7px;min-width:0}
+.chub-avatar{display:inline-flex;align-items:center;justify-content:center;width:23px;height:23px;flex:none;border-radius:7px;background:color-mix(in srgb,var(--chan-accent) 16%,var(--chub-layer-2));color:var(--chan-accent);font-size:11px;font-weight:720}
+.chub-acctid{display:flex;flex-direction:column;gap:0;min-width:0;flex:1}
+.chub-acctid b{font-size:13.5px;line-height:1.5;font-weight:640;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chub-acctid span{font-size:11.5px;line-height:1.45;color:var(--chub-text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chub-acctid i{font-style:normal}
+.chub-acctid i.warn{color:var(--chub-warn)}
+.chub-acctid i.err{color:var(--chub-err)}
+.chub-acctbadges{display:flex;align-items:center;gap:4px;flex-wrap:wrap;justify-content:flex-end}
+.chub-badge{display:inline-flex;align-items:center;padding:1px 6px;border:1px solid var(--chub-line-soft);border-radius:999px;background:var(--chub-layer-1);color:var(--chub-text-3);font-size:11px;line-height:1.5;font-weight:600;white-space:nowrap}
+.chub-badge.ok{color:var(--chub-ok);border-color:color-mix(in srgb,var(--chub-ok) 24%,transparent);background:color-mix(in srgb,var(--chub-ok) 7%,transparent)}
+.chub-badge.warn{color:var(--chub-warn);border-color:color-mix(in srgb,var(--chub-warn) 24%,transparent);background:color-mix(in srgb,var(--chub-warn) 7%,transparent)}
+.chub-badge.err{color:var(--chub-err);border-color:color-mix(in srgb,var(--chub-err) 26%,transparent);background:color-mix(in srgb,var(--chub-err) 7%,transparent)}
+.chub-acctmeta{display:flex;align-items:center;gap:3px 8px;flex-wrap:wrap;font-size:11.5px;line-height:1.5;color:var(--chub-text-3)}
+.chub-acctmeta b{font-weight:650;color:var(--chub-text-2)}
+.chub-acctmeta .warn{color:var(--chub-warn)}
+.chub-acctmeta .err{color:var(--chub-err)}
+/* 额度读数：数值与单位在宿主侧拼好（core/credits.ts），这里只排版。 */
+.chub-credits{display:flex;flex-direction:column;gap:4px;min-width:0}
+.chub-creditline{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;line-height:1.5;color:var(--chub-text-2)}
+.chub-creditline>b{font-weight:680;font-variant-numeric:tabular-nums;color:var(--chub-text)}
+.chub-creditline .chub-creditlabel{font-size:11.5px;font-weight:650;letter-spacing:.06em;text-transform:uppercase;color:var(--chub-text-3)}
+.chub-creditline .err{color:var(--chub-err)}
+.chub-creditline .muted{color:var(--chub-text-3)}
+.chub-credittag{flex:none;padding:0 5px;border:1px solid color-mix(in srgb,var(--chan-accent) 22%,transparent);border-radius:999px;background:color-mix(in srgb,var(--chan-accent) 9%,transparent);color:color-mix(in srgb,var(--chan-accent) 66%,var(--chub-text));font-size:11px;font-weight:600;line-height:1.6;white-space:nowrap}
+.chub-creditbar{height:4px;overflow:hidden;border-radius:2px;background:var(--chub-layer-3)}
+.chub-creditbar>i{display:block;height:100%;border-radius:inherit;background:var(--chan-accent)}
+.chub-creditbar.low>i{background:var(--chub-warn)}
+.chub-creditnote{margin:0;font-size:11.5px;line-height:1.5;color:var(--chub-text-3);overflow-wrap:anywhere}
+.chub-creditnote.err{color:var(--chub-err)}
+.chub-pkgs{display:flex;flex-direction:column;gap:5px;padding-top:5px}
+.chub-pkg{display:flex;flex-direction:column;gap:3px;min-width:0;padding:5px 7px;border-radius:7px;background:color-mix(in srgb,var(--chub-layer-2) 62%,transparent)}
+.chub-pkg.off{opacity:.5}
+.chub-pkghead{display:flex;align-items:baseline;gap:6px;min-width:0;font-size:11.5px;line-height:1.5;color:var(--chub-text-3)}
+.chub-pkgname{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--chub-text-2);font-weight:600}
+.chub-pkgval{flex:none;font-variant-numeric:tabular-nums;color:var(--chub-text-2)}
+.chub-pkgwhen{flex:none;font-variant-numeric:tabular-nums;color:var(--chub-text-3);white-space:nowrap}
+.chub-acctacts{display:flex;align-items:center;gap:3px;flex-wrap:wrap}
+.chub-inline{margin:0;font-size:12.5px;line-height:1.6;color:var(--chub-text-2);overflow-wrap:anywhere}
+.chub-inline.err{color:var(--chub-err)}
+.chub-inline.muted{color:var(--chub-text-3)}
+.chub-models summary,.chub-fold summary{display:flex;align-items:center;gap:6px;list-style:none;cursor:pointer;color:var(--chub-text-2);font-size:12.5px;line-height:1.5}
+.chub-models summary::-webkit-details-marker,.chub-fold summary::-webkit-details-marker{display:none}
+.chub-models summary::before,.chub-fold summary::before{content:"›";display:inline-block;color:var(--chub-text-3);font-size:16px;line-height:1;transition:transform .15s ease;transform:translateY(-1px)}
+.chub-models[open] summary::before,.chub-fold[open] summary::before{transform:rotate(90deg) translateX(-1px)}
+.chub-models summary{padding:5px 7px;border:1px solid var(--chub-line-soft);border-radius:8px;background:var(--chub-layer-1)}
+.chub-models summary:hover{border-color:color-mix(in srgb,var(--chan-accent) 34%,var(--chub-line))}
+.chub-summaryhint{margin-left:auto;font-size:11.5px;font-weight:400;color:var(--chub-text-3);text-align:right}
+.chub-modelacts{display:flex;align-items:center;gap:4px;padding:7px 2px 1px;flex-wrap:wrap}
+.chub-modelacthint{margin-right:auto;color:var(--chub-text-3);font-size:11.5px}
+.chub-modellist{display:grid;grid-template-columns:1fr;gap:3px;padding-top:6px}
+.chub-model{display:flex;align-items:center;gap:6px;min-width:0;padding:5px 7px;border-radius:6px;background:color-mix(in srgb,var(--chub-layer-2) 66%,transparent);font-size:12px;line-height:1.5;cursor:pointer}
+.chub-model:hover{background:var(--chub-layer-2)}
+.chub-model.off{opacity:.48}
+.chub-model input{width:13px;height:13px;margin:0;flex:none;accent-color:var(--chub-accent)}
+.chub-modelname{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--chub-text-2)}
+.chub-promo{flex:none;padding:0 5px;border-radius:999px;background:color-mix(in srgb,var(--chub-warn) 14%,transparent);color:color-mix(in srgb,var(--chub-warn) 80%,var(--chub-text));font-size:11px;font-weight:600;line-height:1.6;letter-spacing:0;white-space:nowrap}
+.chub-factor{flex:none;padding:0 5px;border:1px solid color-mix(in srgb,var(--chan-accent) 22%,transparent);border-radius:999px;background:color-mix(in srgb,var(--chan-accent) 10%,var(--chub-layer-2));color:color-mix(in srgb,var(--chan-accent) 68%,var(--chub-text));font-size:11px;font-weight:650;line-height:1.6;font-variant-numeric:tabular-nums;letter-spacing:0;white-space:nowrap}
+.chub-panel{display:flex;flex-direction:column;gap:10px;min-width:0;padding:14px 15px;border:1px solid var(--chub-line-soft);border-radius:14px;background:linear-gradient(160deg,var(--chub-layer-1),color-mix(in srgb,var(--chub-layer-1) 62%,transparent))}
+.chub-panelhead{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
+.chub-panelhead>div:first-child{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 280px}
+.chub-panelhead p{margin:0;font-size:12.5px;line-height:1.55;color:var(--chub-text-3)}
+.chub-panelhint{font-size:12px;color:var(--chub-text-3);white-space:nowrap}
+/* 6 张卡在宽屏按 3 列排满两行；auto-fit 会在 1240px 下排出 5+1 的孤行。 */
+.chub-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}
+.chub-kpi{display:flex;flex-direction:column;gap:1px;min-width:0;padding:12px 13px;border:1px solid var(--chub-line-soft);border-radius:12px;background:linear-gradient(165deg,var(--chub-layer-2),var(--chub-layer-1))}
+.chub-kpilabel{font-size:11.5px;line-height:1.4;font-weight:650;letter-spacing:.08em;text-transform:uppercase;color:var(--chub-text-3)}
+.chub-kpivalue{font-size:28px;line-height:1.2;font-weight:760;letter-spacing:-.025em;font-variant-numeric:tabular-nums;background:linear-gradient(110deg,var(--chub-text),color-mix(in srgb,var(--chub-accent) 68%,var(--chub-text)));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;overflow-wrap:anywhere}
+.chub-kpisub{font-size:12px;line-height:1.5;color:var(--chub-text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chub-notes{display:flex;align-items:center;gap:4px 12px;flex-wrap:wrap;padding:8px 11px;border:1px dashed var(--chub-line-soft);border-radius:10px;font-size:12.5px;line-height:1.5;color:var(--chub-text-3)}
+.chub-notes b{font-weight:650;color:var(--chub-text-2)}
+.chub-chartbody{display:flex;flex-direction:column;gap:4px;padding-top:2px}
+.chub-chartsvg{display:block;width:100%;height:150px;overflow:visible}
+.chub-bar{transition:opacity .15s ease}
+.chub-bar:hover{opacity:1}
+/**
+ * 堆叠柱的每一段。
+ *
+ * ⚠️ 颜色由组件按渠道**内联**给出（fill 属性），因为渠道集合是动态的、
+ * 数量不定，写死在 CSS 里会出现「第 11 个渠道没有颜色」。这里只负责
+ * 悬停反馈。
+ */
+.chub-seg{transition:opacity .15s ease}
+.chub-seg:hover{opacity:.82}
+/**
+ * 图例：渠道 → 色块。
+ *
+ * 自动换行；渠道多时也不会把图表挤走。色块与柱段用同一个颜色源。
+ */
+.chub-legend{display:flex;align-items:center;gap:4px 12px;flex-wrap:wrap;padding-top:6px;font-size:11.5px;line-height:1.5;color:var(--chub-text-3)}
+.chub-legenditem{display:inline-flex;align-items:center;gap:5px;min-width:0}
+.chub-legenddot{flex:none;width:9px;height:9px;border-radius:3px}
+.chub-legendname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:12em}
+/* 图例里的区间合计：与渠道名区分开，数字用等宽字形避免抖动。 */
+.chub-legendvalue{flex:none;color:var(--chub-text-2);font-variant-numeric:tabular-nums}
+/**
+ * 图例开头的「合计」：说明图例数字的口径是**整个筛选区间**，
+ * 而柱子是每日的量 —— 两者量级不同，不写清会让人以为数字对不上。
+ */
+.chub-legendtotal{display:inline-flex;align-items:baseline;gap:4px;flex:none;padding-right:10px;margin-right:2px;border-right:1px solid var(--chub-line-soft);color:var(--chub-text-3);font-size:11.5px;white-space:nowrap}
+.chub-legendtotal b{font-size:12.5px;font-weight:700;color:var(--chub-text);font-variant-numeric:tabular-nums}
+.chub-gridline{stroke:var(--chub-line-soft);stroke-width:1;stroke-dasharray:3 5}
+/* 标签按柱子格数等分，每格居中 —— 与 SVG 里「柱心 = 格中点」严格对齐。 */
+.chub-axis{display:grid;align-items:center;gap:0;font-size:11.5px;color:var(--chub-text-3);font-variant-numeric:tabular-nums}
+.chub-axis span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
+/**
+ * 账号透视与模型性能：**上下各占一整行**。
+ *
+ * ⚠️ 原实现是 auto-fit + minmax(430px,1fr) 的双栏（用户 2026-10-21 要求改成
+ * 不要并排）。这两张表都是 7 列，挤在半宽里每个单元格都变窄、模型名与账号名
+ * 频繁折行；而整窗面板本来就有充足横向空间，双栏纯属浪费。
+ * 改成单列后每张表都拿到完整宽度，行高也更稳定。
+ */
+.chub-stack{display:flex;flex-direction:column;gap:10px}
+.chub-stack>section{display:flex;flex-direction:column;min-width:0}
+/**
+ * 看板里这两张汇总表不必拉满整行。
+ *
+ * ⚠️ 改成上下堆叠后出现的新问题（2560px 实测）：表格继承 width:100%，
+ * 7 列被摊到 2500px 宽，列间留出大片空白，数字与表头离得很远反而难读。
+ * 给一个**上限**让它们停在便于扫读的宽度；窗口窄于该值时仍自适应收缩。
+ * 只作用于 .chub-stack 内的表，运行日志那种真正需要宽度的表不受影响。
+ */
+.chub-stack .chub-scroll>table{max-width:1180px}
+/**
+ * 「来源 / 名称」两段式单元格。
+ *
+ * 来源是分类信息、名称才是主体，故来源弱化一档；分隔符再淡一档，避免
+ * 「qoder / 某账号」被读成一整串。
+ */
+.chub-source{display:inline-flex;align-items:baseline;gap:0;min-width:0}
+.chub-source .chub-sep{color:var(--chub-text-3);opacity:.7}
+.chub-source{color:var(--chub-text)}
+.chub-source>.chub-sep+*{color:var(--chub-text-2)}
+.chub-fold{margin-top:1px;padding-top:7px;border-top:1px dashed var(--chub-line-soft)}
+.chub-pre{max-height:210px;margin:5px 0 0;padding:9px 10px;overflow:auto;border-radius:9px;background:var(--chub-layer-1);font-size:12px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+/**
+ * 表格：**消除横向滚动**。
+ *
+ * 原实现给每个 td 都加 white-space:nowrap，短内容（时间、数字、状态）确实
+ * 好看，但长内容（模型名、渠道名、账号标签）会把表格撑出容器宽度，于是每次
+ * 都冒出一条横向滚动条 —— 用户明确要求尽量减少它。
+ *
+ * 做法：默认允许换行，只让**真正短的列**保持 nowrap（见 td.nowrap 与表头）。
+ * 换行优先于横向滚动：宁可多占一行高度，也不让用户左右拖动。
+ *
+ * ⚠️ overflow-x:auto 保留为**兜底**：极端窄窗口下若某列实在放不下，至少还
+ * 滚得动，而不是内容被裁掉看不见。
+ */
+.chub-scroll{table-layout:auto;overflow-x:auto;overflow-y:hidden;border:1px solid var(--chub-line-soft);border-radius:11px;background:color-mix(in srgb,var(--chub-layer-1) 55%,transparent)}
+.chub-panel>.chub-scroll{border-color:transparent;background:transparent}
+.chub-scroll table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.45}
+.chub-scroll th{position:sticky;top:0;z-index:1;padding:7px 9px;border-bottom:1px solid var(--chub-line);background:var(--chub-layer-2);color:var(--chub-text-3);font-size:11.5px;font-weight:650;letter-spacing:.03em;text-align:left;white-space:nowrap}
+/* 单元格默认换行，但只在**词边界**断，不把单词拆成单字符。 */
+/* 单元格默认垂直居中：行高由最高的格子决定，其余格子与它居中对齐。 */
+.chub-scroll td{padding:6px 9px;border-top:1px solid var(--chub-line-soft);color:var(--chub-text-2);text-align:left;vertical-align:middle;overflow-wrap:break-word}
+/*
+ * 长文本列（渠道 / 模型、账号）给一个下限。
+ *
+ * ⚠️ 真实缺陷（1280px 复现）：不设 min-width 时表格会把剩余宽度摊给每列，
+ * 长账号被压到几十像素，于是邮箱地址竖排成一列单字符（rebe / lber / ial@ …），
+ * 比横向滚动难读得多。宁可让这类列撑到 9em 宽、必要时整表横向滚动，
+ * 也不要文字竖排。
+ */
+.chub-scroll td.wide{min-width:9em}
+/* 短内容列保持单行（时间、数字、状态、比例），既不换行也不撑宽。 */
+.chub-scroll td.nowrap,
+.chub-scroll td:has(> code){white-space:nowrap}
+/**
+ * 含可展开 JSON 的单元格（details）：顶部对齐并限制展开宽度。
+ *
+ * ⚠️ **不能写成 td:last-child**（真实缺陷，2026-10-21 用户报障「运行日志
+ * 最后一列内容会不是垂直居中」）：旧「详情」列正好是最后一列，于是这条规则
+ * 用位置选中了它。详情列移除后最后一列变成「缓存命中率」，vertical-align:top
+ * 就把它顶到行首，与同排其它居中的单元格错位。
+ * 故改为按**内容**选中：只有真的带 details 的格子才顶部对齐。
+ */
+.chub-scroll td:has(details){vertical-align:top}
+.chub-scroll td details{max-width:260px}
+.chub-scroll td .chub-pre{max-width:260px}
+.chub-scroll td summary{white-space:nowrap}
+.chub-scroll tbody tr:first-child td{border-top:0}
+.chub-scroll tbody tr:hover td{background:color-mix(in srgb,var(--chub-layer-2) 52%,transparent)}
+.chub-scroll code{padding:1px 4px;border-radius:4px;background:var(--chub-layer-2);font-size:11.5px}
+/**
+ * 窄容器下丢弃**次要列**，而不是留一条横向滚动条。
+ *
+ * ⚠️ 这些列（步数、缓存读/写、思考）在宽屏下有信息量，但它们的值都能在
+ * 「详情」展开的原始 attempts JSON 里查到（步数还直接写在详情摘要里）。
+ * 容器不够宽时优先保住时间、渠道、结果、账号、耗时、速度这些主列 ——
+ * 让用户横向拖动去看一眼步数，比少显示一列更烦人。
+ */
+@container chub (max-width:1400px){
+  .chub-scroll th.lowpri,.chub-scroll td.lowpri{display:none}
+}
+.chub-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:22px 16px;border:1px dashed var(--chub-line);border-radius:11px;background:color-mix(in srgb,var(--chub-layer-1) 62%,transparent);text-align:center}
+.chub-empty b{font-size:13.5px;font-weight:640}
+.chub-empty p{margin:0;font-size:12.5px;line-height:1.55;color:var(--chub-text-3)}
+.chub-pager{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--chub-text-3)}
+.chub-pager>div{display:flex;align-items:center;gap:5px}
+.chub-pager b{font-weight:650;color:var(--chub-text-2);font-variant-numeric:tabular-nums}
+.chub-logpanel{padding:0;overflow:hidden}
+/**
+ * 运行日志：表格**自己纵向滚动**，横向滚动条因此固定在它的底边常驻可见。
+ *
+ * ⚠️ 真实诉求（2026-10-21，用户带侧栏、窗口更窄）：日志表在窄窗口下确实
+ * 需要横向滚动，但滚动条画在**表格容器的底边**——若整个日志区跟着页面一起
+ * 滚，用户必须先滚到表格最末一行才看得见它，想左右拖还得来回滚。
+ *
+ * 做法：把这一页的内容区变成"填满剩余高度"的列，日志面板 flex:1 占据
+ * 剩余空间，表格容器 height:100% 且在内部 overflow:auto。于是：
+ *  - 纵向滚动发生在表格容器内部（表头 sticky 仍然有效）；
+ *  - 横向滚动条永远贴在容器底边，不需要先滚到底。
+ *
+ * ⚠️ 不能只给容器 max-height：那会把日志表压成固定高度的小窗口，
+ * 短列表也会留一片空白。flex:1 + min-height:0 才是"用了多少占多少、
+ * 剩余高度全给表格"。
+ */
+.chub-logs,.chub-logs>.chub-section{display:flex;flex-direction:column;min-height:0}
+.chub-logs{flex:1 1 auto;overflow:hidden}
+.chub-logs>.chub-section{flex:1 1 auto}
+.chub-logs .chub-sectionhead,.chub-logs .chub-pager{flex:none}
+.chub-logs .chub-logpanel{flex:1 1 auto;min-height:0}
+.chub-logs .chub-logpanel>.chub-scroll{height:100%;min-height:0;overflow:auto}
+/**
+ * 滚动条**始终可见**，且宽度明确。
+ *
+ * ⚠️ Chromium 在 Windows 上默认用**覆盖式滚动条**（overlay）：不滚动时淡出，
+ * 且细到不易抓取。用户明确要求「出现横向滚动条时一直可见以便拖动」，故：
+ *  - scrollbar-width:auto（不用 thin，否则更难抓）
+ *  - 显式给 webkit 滚动条尺寸与滑块颜色，避免"看不见就没法拖"
+ *  - overflow-x:auto 而不是 overlay，逼出占位式滚动条
+ *
+ * ⚠️ 不要把 webkit 滚动条设成 display:none —— 那会彻底消灭拖动条，
+ * 只能靠触控板横向滑，鼠标用户就没有出路了。
+ */
+.chub-scroll{scrollbar-width:auto;scrollbar-color:color-mix(in srgb,var(--chub-text-3) 62%,transparent) transparent}
+.chub-scroll::-webkit-scrollbar{width:11px;height:11px}
+.chub-scroll::-webkit-scrollbar-track{background:color-mix(in srgb,var(--chub-layer-2) 70%,transparent);border-radius:6px}
+.chub-scroll::-webkit-scrollbar-thumb{border:2px solid transparent;border-radius:6px;background-clip:content-box;background-color:color-mix(in srgb,var(--chub-text-3) 55%,transparent)}
+.chub-scroll::-webkit-scrollbar-thumb:hover{background-color:color-mix(in srgb,var(--chub-text-3) 78%,transparent)}
+.chub-scroll::-webkit-scrollbar-corner{background:transparent}
+.chub-migration{gap:9px}
+.chub-panelacts{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+@keyframes chub-in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+@media (hover:hover){
+  .chub-channel:hover{transform:translateY(-2px);border-color:color-mix(in srgb,var(--chan-accent) 30%,var(--chub-line));box-shadow:0 12px 28px color-mix(in srgb,#000 10%,transparent)}
+}
+/**
+ * 断点用**容器查询**而不是视口宽度。
+ *
+ * ⚠️ 这是从设置页迁到整窗面板时暴露的真实问题：旧断点按**视口宽度**判分栏，
+ * 而设置页里视口可能有 1400px、实际内容区只有约 564px —— 那条查询永远不命中，
+ * 双栏和 3 列 KPI 就在 564px 里硬挤。容器查询让「宽了就分栏、窄了就单列」
+ * 跟着**真实可用宽度**走，两个入口（整窗 / 设置）自动各得其所，不需要两套规则。
+ */
+.chub{container-type:inline-size;container-name:chub}
+@container chub (max-width:820px){
+  .chub-channels{grid-template-columns:1fr}
+  .chub-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .chub-hero{padding:18px 18px 16px}
+}
+@container chub (max-width:560px){
+  .chub{gap:13px}
+  .chub h2{font-size:23px}
+  .chub-hero{padding:15px 14px 13px;border-radius:16px}
+  .chub-pagehead{align-items:flex-start}
+  .chub-pills{width:100%;margin-left:0}
+  .chub-pill{flex:1;justify-content:center}
+  .chub-ministats{grid-template-columns:1fr 1fr}
+  .chub-kpis{grid-template-columns:1fr}
+  .chub-navbar{align-items:stretch}
+  .chub-tabs{width:100%}
+  .chub-tabs button{flex:1;padding:6px 8px}
+  .chub-navacts{width:100%;justify-content:space-between}
+  .chub-field,.chub-field.grow{flex:1 1 100%}
+  .chub-channel{padding:13px 13px 11px;border-radius:13px}
+  .chub-panel{padding:12px 12px}
+  .chub-chanstate{display:none}
+}
+/**
+ * 窄窗口下的补充规则。
+ *
+ * ⚠️ 用 @media 而不是容器查询：这里调的是**容器自己的内边距**，属于
+ * 「窗口有多窄」的问题；容器查询只能改子孙元素，改不了被查询容器自身。
+ */
+@media (max-width:820px){
+  .chub{padding:0 14px 24px}
+}
+@media (prefers-reduced-motion:reduce){
+  .chub *,.chub *::before,.chub *::after{animation-duration:.001ms !important;transition-duration:.001ms !important}
+}
