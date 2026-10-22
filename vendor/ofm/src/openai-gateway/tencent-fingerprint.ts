@@ -45,7 +45,10 @@
  * 本文件来自 OFM 网关，但独立渠道中心不挂载旧网关，故 buddy-adapter 在
  * system 序列化后也应用本表。2026-10-21 真实账号复现还确认 Harness 自带的
  * 身份首句会触发 11128：原始 5764 字符 system 与该句单独发送均 HTTP 400；
- * 仅将 powered by 改为 running in，完整 system 与该句均 HTTP 200 且输出 OK。
+ * 身份句曾通过单句改写验收，但不能据此宣称完整模板已兼容：同日 Nornia
+ * 新会话复验发现，改写身份句后的完整模板仍 400。第二处触发是 Web GUI
+ * 说明的前两句连续出现；该两句单独发送也 400，仅将句间空格改为段落换行，
+ * 完整模板加 34 个工具定义即 200 且输出 OK。该新规则仅在 buddy 国区启用。
  * 因此早期「DSH 直连不受影响」的结论不适用于当前 Harness 模板。
  * 只处理表内已验证的 system 字面量，不改用户/工具内容或持久化历史。
  *
@@ -67,6 +70,8 @@
 const TENCENT_PROVIDERS: readonly string[] = ['buddy', 'workbuddy']
 
 interface ContentFingerprint {
+  /** 缺省沿用腾讯系共用规则；有区域限定的实证只应用到对应产品。 */
+  readonly providers?: readonly string[]
   /** 被拦的**字面量**（匹配时**大小写不敏感**，但不做任何模式泛化）。 */
   readonly find: string
   /** 等义改写；实测范围见 note。 */
@@ -92,7 +97,13 @@ const CONTENT_FINGERPRINTS: readonly ContentFingerprint[] = [
   {
     find: 'You are an AI agent powered by DeepSeek Harness.',
     replace: 'You are an AI agent running in DeepSeek Harness.',
-    note: '本机 2026-10-21 Buddy hy3 真实账号：原句与完整 Harness system 均 400/11128，仅改该句后均 200 并输出 OK',
+    note: '本机 2026-10-21 Buddy hy3 身份句实证；后续 Nornia 完整模板仍被 Web GUI 两句触发，须同时应用下条国区规则',
+  },
+  {
+    providers: ['buddy'],
+    find: 'You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI.',
+    replace: 'You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names.\n\nWhen the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI.',
+    note: '本机 2026-10-21 Nornia Buddy hy3：原始两句单独 400/11128；仅句间分段后，完整 5765 字符 system 加 34 个工具、max_tokens=512 返回 200/OK；国际版未复现，不启用此规则',
   },
 ]
 
@@ -102,6 +113,7 @@ function escapeRegExp(literal: string): string {
 }
 
 interface CompiledFingerprint {
+  readonly providers?: readonly string[]
   readonly replace: string
   /** 小写形态，用于 `includes` 预检（不命中就不必跑正则，字符串**原样**返回）。 */
   readonly findLower: string
@@ -109,6 +121,7 @@ interface CompiledFingerprint {
 }
 
 const COMPILED: readonly CompiledFingerprint[] = CONTENT_FINGERPRINTS.map((rule) => ({
+  providers: rule.providers,
   replace: rule.replace,
   findLower: rule.find.toLowerCase(),
   // `g` = 全部出现都改写；`i` = 大小写不敏感（实测全小写 / 全大写同样被拦）。
@@ -128,7 +141,7 @@ export function isTencentContentFingerprintProvider(provider: string): boolean {
  * - **非腾讯系 provider 原样返回**（同一个函数指针意义上的同一份字符串内容）；
  * - **不含任何指纹的文本逐字符不变** —— 这一条是硬要求：腾讯侧按前缀缓存，
  *   无谓地重建字符串会让每一轮都算作新前缀，白白吃掉缓存命中；
- * - 只改**内容**，不删句子、不改结构：`Main branch (PRs usually go here)` 与原句
+ * - 只作已验证的等义改写或句间分段，不删句子、不改指令：`Main branch (PRs usually go here)` 与原句
  *   语义等价，模型读到的仍是「主分支（提 PR 通常走这里）」。
  *
  * @param text 已取出的 system 纯文本
@@ -138,6 +151,7 @@ export function rewriteTencentContentFingerprints(text: string, provider: string
   if (!isTencentContentFingerprintProvider(provider)) return text
   let out = text
   for (const rule of COMPILED) {
+    if (rule.providers !== undefined && !rule.providers.includes(provider)) continue
     // 预检：不含（小写化后的）字面量就整条跳过，`out` 保持同一份字符串内容。
     if (!out.toLowerCase().includes(rule.findLower)) continue
     // `String.replace` 配 `g` 正则会在调用前后把 lastIndex 归零，不会串状态。

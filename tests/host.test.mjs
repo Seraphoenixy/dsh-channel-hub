@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 let host;
 try {
   host = await import("@deepseek-ai/cordis");
@@ -61,6 +62,16 @@ test(
             provider: "buddy",
             nickname: "Buddy Two",
             credentialRef: "BUDDY_2",
+            enabled: true,
+            refreshable: false,
+            createdAt: Date.now(),
+          },
+          {
+            // 渠道未注册的账号（模拟「删了驱动没删账号」的遗留）
+            id: "zcode-orphan",
+            provider: "zcode",
+            nickname: "Orphan",
+            credentialRef: "ZCODE_ORPHAN",
             enabled: true,
             refreshable: false,
             createdAt: Date.now(),
@@ -132,6 +143,66 @@ test(
         items: [],
       });
       assert.deepEqual(await plugin.dispatch("migration.preview"), []);
+      // 渠道未注册的账号（驱动不存在）：必须被报告出来，而不是隐形留在磁盘上。
+      // 真实遗留：删掉 zcode 驱动后，账号行与三个快照键又活了 26 小时。
+      assert.deepEqual(
+        (await plugin.dispatch("accounts.orphans")).map((a) => a.id),
+        ["zcode-orphan"],
+        "accounts whose provider has no driver must be reported",
+      );
+      assert.equal(
+        (await plugin.dispatch("channels.list")).some((c) => c.id === "zcode"),
+        false,
+        "an orphaned provider must not become a channel",
+      );
+      // 删号必须连带清掉 per-account 快照，否则每删一个号都留 3–4 个孤儿键。
+      const ledger = new DatabaseSync(join(data, "ledger.sqlite"));
+      ledger.exec("PRAGMA busy_timeout = 5000");
+      const seed = (key, value) =>
+        ledger
+          .prepare(
+            "INSERT INTO kv VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data",
+          )
+          .run(key, JSON.stringify(value));
+      for (const key of [
+        "catalog:zcode:zcode-orphan",
+        "balance:zcode-orphan",
+        "checkin:zcode-orphan",
+        "identity:zcode/zcode-orphan",
+      ])
+        seed(key, { seeded: true });
+      seed("checkin:buddy-1", { seeded: true }); // 对照：别的账号的键不能被误删
+      ledger.close();
+
+      assert.equal(
+        await plugin.dispatch("accounts.delete", { id: "zcode-orphan" }),
+        true,
+      );
+      assert.deepEqual(await plugin.dispatch("accounts.orphans"), []);
+      assert.deepEqual(
+        (await plugin.dispatch("channels.list"))
+          .find((c) => c.id === "buddy")
+          .accounts.map((a) => a.id),
+        ["buddy-2", "buddy-1"],
+        "deleting an orphan must not disturb a normal channel",
+      );
+
+      const after = new DatabaseSync(join(data, "ledger.sqlite"));
+      const keys = after
+        .prepare("SELECT key FROM kv ORDER BY key")
+        .all()
+        .map((row) => row.key);
+      after.close();
+      assert.equal(
+        keys.some((key) => key.includes("zcode")),
+        false,
+        "deleting an account must purge its catalog / balance / checkin / identity rows",
+      );
+      assert.equal(
+        keys.includes("checkin:buddy-1"),
+        true,
+        "other accounts' snapshots must survive",
+      );
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -144,11 +215,11 @@ test(
 );
 
 test(
-  "actual host prepareCall -> Qoder WASM -> stream -> persistent request",
+  "actual host prepareCall -> Qoder WASM and Buddy system compatibility -> persistent requests",
   { skip: !host },
   async () => {
     const { Context, Service } = host;
-    const { LlmRuntime, createUserMessage } = await import(
+    const { LlmRuntime, createUserMessage, createSystemMessage } = await import(
       "@deepseek-ai/dsh-llm"
     );
     const { credentialRef } = await import("@deepseek-ai/dsh-credentials");
@@ -163,6 +234,15 @@ test(
       join(data, "channel-pack", "state.json"),
       JSON.stringify({
         accounts: [
+          {
+            id: "buddy-test",
+            provider: "buddy",
+            nickname: "Buddy fixture",
+            credentialRef: "BUDDY_TEST",
+            enabled: true,
+            refreshable: false,
+            createdAt: Date.now(),
+          },
           {
             id: "test-account",
             provider: "qodercn",
@@ -204,6 +284,7 @@ test(
       }),
     );
     const values = new Map([
+      [namespace + "BUDDY_TEST", JSON.stringify({ access_token: "synthetic-buddy", domain: "copilot.tencent.com" })],
       [
         namespace + "TEST_CREDENTIAL",
         JSON.stringify({
@@ -263,6 +344,10 @@ test(
       fetchBefore = globalThis.fetch;
     process.env.DSH_HOME = dir;
     let inference = 0;
+    let buddyInference = 0;
+    const guiFirst = "You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names.";
+    const guiSecond = 'When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI.';
+    const guiPair = guiFirst + " " + guiSecond;
     globalThis.fetch = async (input, init) => {
       const url = String(input);
       const headers = new Headers(
@@ -274,6 +359,8 @@ test(
           headers: { "content-type": "application/json" },
         });
       if (url.endsWith("/v3/config")) {
+        if (url.startsWith("https://copilot.tencent.com/"))
+          return Response.json({ data: { models: [{ id: "hy3", name: "Hy3" }], agents: [{ name: "craft", models: ["hy3"] }] } });
         if (headers.get("authorization")?.includes("synthetic-workbuddy-fail"))
           return new Response("{}", {
             status: 500,
@@ -332,6 +419,15 @@ test(
             "data: [DONE]\n\n",
           { headers: { "content-type": "text/event-stream" } },
         );
+      }
+      if (url === "https://copilot.tencent.com/v2/chat/completions") {
+        buddyInference++;
+        const body = JSON.parse(init.body);
+        assert.equal(body.messages[0].content, "You are an AI agent running in DeepSeek Harness.\n\n" + guiFirst + "\n\n" + guiSecond);
+        assert.equal(body.messages[1].content, guiFirst + "\n\n" + guiSecond);
+        assert.equal(body.messages[2].content, guiPair);
+        assert.equal(body.tools[0].function.name, "read_file");
+        return new Response('data: {"choices":[{"delta":{"content":"OK"},"finish_reason":null}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { headers: { "content-type": "text/event-stream" } });
       }
       throw Error("Unexpected fixture endpoint " + url);
     };
@@ -434,6 +530,21 @@ test(
         (await plugin.dispatch("usage.summary")).totals.totalTokens,
         12,
       );
+      await plugin.dispatch("models.refresh", { provider: "buddy" });
+      const buddyCall = await llm.prepareCall({ provider: "channel-hub/buddy", model: "hy3", maxTokens: 512 });
+      const buddyChunks = [];
+      for await (const chunk of buddyCall.stream({
+        ...buddyCall.config,
+        system: "You are an AI agent powered by DeepSeek Harness.\n\n" + guiPair,
+        messages: [createSystemMessage(guiPair), createUserMessage({ content: [{ type: "text", text: guiPair }] })],
+        tools: [{ name: "read_file", description: "Read a synthetic file", parameters: { type: "object", properties: {} } }],
+      })) buddyChunks.push(chunk);
+      assert.equal(buddyInference, 1);
+      assert.ok(buddyChunks.some(c => c.type === "text-delta" && c.text === "OK"), JSON.stringify(buddyChunks));
+      const buddyRecords = await plugin.dispatch("requests.list", { provider: "buddy" });
+      assert.equal(buddyRecords.total, 1);
+      assert.equal(buddyRecords.items[0].outcome, "success");
+      assert.equal(buddyRecords.items[0].attempts[0].accountId, "buddy-test");
     } finally {
       await plugin?.stop();
       globalThis.fetch = fetchBefore;

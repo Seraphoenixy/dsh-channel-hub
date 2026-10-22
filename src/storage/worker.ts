@@ -13,6 +13,7 @@ parentPort!.on("message", ({ id, method, args }) => {
       "prune",
       "get",
       "set",
+      "del",
       "close",
     ];
     if (!allowed.includes(method)) throw Error("Unknown database operation");

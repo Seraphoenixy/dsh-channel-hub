@@ -989,6 +989,15 @@ var CatalogService = class {
     }
     return this.cache.get(key) ?? { models: [], updated: 0, stale: true };
   }
+  /**
+   * 丢掉一个键的内存缓存（删号时调用）。
+   *
+   * 不丢的后果：同一账号 id 重新登录后 `hydrate()` 会先命中这份旧缓存，把上一个
+   * 账号的模型目录带回来 —— 此时磁盘上的行已经被 `purgeAccountSnapshots` 清掉了。
+   */
+  forget(key) {
+    this.cache.delete(key);
+  }
   refresh(key, fetcher) {
     const existing = this.inflight.get(key);
     if (existing) return existing;
@@ -1110,7 +1119,12 @@ var Observer = class {
     };
     req.turnId = this.turnFor(meta, req.id);
     if (meta?.startsTurn === true) req.startsTurn = true;
-    const scope = { request: req, attempts: [], accountId: "" };
+    const scope = {
+      request: req,
+      attempts: [],
+      accountId: "",
+      requestedAccountId: meta?.requestedAccountId
+    };
     await this.write("begin", req);
     let iterator;
     let completed = false;
@@ -1324,7 +1338,10 @@ var Observer = class {
           cancel: async (reason) => {
             const aborted = init?.signal?.aborted === true || this.context.getStore()?.abortSource !== void 0;
             if (a.outcome === "running")
-              await finish(aborted ? "cancelled" : "success", aborted ? reason : void 0);
+              await finish(
+                aborted ? "cancelled" : "success",
+                aborted ? reason : void 0
+              );
             await reader.cancel(reason).catch(() => {
             });
           }
@@ -2140,6 +2157,35 @@ var MigrationService = class {
     return report;
   }
 };
+
+// src/core/account-cleanup.ts
+function accountSnapshotKeys(account) {
+  return [
+    "catalog:" + account.provider + ":" + account.id,
+    "balance:" + account.id,
+    "checkin:" + account.id,
+    "identity:" + account.provider + "/" + account.id
+  ];
+}
+async function purgeAccountSnapshots(store, account, logger) {
+  const purged = [];
+  const failed = [];
+  for (const key of accountSnapshotKeys(account)) {
+    try {
+      await store.call("del", key);
+      purged.push(key);
+    } catch (error) {
+      const message = redact(error);
+      failed.push({ key, error: message });
+      logger?.warn("\u8D26\u53F7\u5FEB\u7167\u6E05\u7406\u5931\u8D25\uFF08" + key + "\uFF09\uFF1A" + message);
+    }
+  }
+  return { purged, failed };
+}
+function orphanAccounts(accounts, providers) {
+  const known = new Set(providers);
+  return accounts.filter((a) => !known.has(a.provider));
+}
 
 // src/host/browser.ts
 import { spawn } from "node:child_process";
@@ -7775,13 +7821,20 @@ var CONTENT_FINGERPRINTS = [
   {
     find: "You are an AI agent powered by DeepSeek Harness.",
     replace: "You are an AI agent running in DeepSeek Harness.",
-    note: "\u672C\u673A 2026-10-21 Buddy hy3 \u771F\u5B9E\u8D26\u53F7\uFF1A\u539F\u53E5\u4E0E\u5B8C\u6574 Harness system \u5747 400/11128\uFF0C\u4EC5\u6539\u8BE5\u53E5\u540E\u5747 200 \u5E76\u8F93\u51FA OK"
+    note: "\u672C\u673A 2026-10-21 Buddy hy3 \u8EAB\u4EFD\u53E5\u5B9E\u8BC1\uFF1B\u540E\u7EED Nornia \u5B8C\u6574\u6A21\u677F\u4ECD\u88AB Web GUI \u4E24\u53E5\u89E6\u53D1\uFF0C\u987B\u540C\u65F6\u5E94\u7528\u4E0B\u6761\u56FD\u533A\u89C4\u5219"
+  },
+  {
+    providers: ["buddy"],
+    find: 'You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI.',
+    replace: 'You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names.\n\nWhen the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI.',
+    note: "\u672C\u673A 2026-10-21 Nornia Buddy hy3\uFF1A\u539F\u59CB\u4E24\u53E5\u5355\u72EC 400/11128\uFF1B\u4EC5\u53E5\u95F4\u5206\u6BB5\u540E\uFF0C\u5B8C\u6574 5765 \u5B57\u7B26 system \u52A0 34 \u4E2A\u5DE5\u5177\u3001max_tokens=512 \u8FD4\u56DE 200/OK\uFF1B\u56FD\u9645\u7248\u672A\u590D\u73B0\uFF0C\u4E0D\u542F\u7528\u6B64\u89C4\u5219"
   }
 ];
 function escapeRegExp(literal) {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 var COMPILED = CONTENT_FINGERPRINTS.map((rule) => ({
+  providers: rule.providers,
   replace: rule.replace,
   findLower: rule.find.toLowerCase(),
   // `g` = 全部出现都改写；`i` = 大小写不敏感（实测全小写 / 全大写同样被拦）。
@@ -7794,6 +7847,7 @@ function rewriteTencentContentFingerprints(text3, provider) {
   if (!isTencentContentFingerprintProvider(provider)) return text3;
   let out = text3;
   for (const rule of COMPILED) {
+    if (rule.providers !== void 0 && !rule.providers.includes(provider)) continue;
     if (!out.toLowerCase().includes(rule.findLower)) continue;
     out = out.replace(rule.pattern, rule.replace);
   }
@@ -8505,13 +8559,13 @@ var BuddyAdapter = class _BuddyAdapter extends LlmAdapter2 {
       }
     }
     const messages = serializeMessages2(options.messages, imageUrls);
+    if (options.system !== void 0 && options.system.length > 0) {
+      messages.unshift({ role: "system", content: options.system });
+    }
     for (const message of messages) {
       if (message.role === "system" && typeof message.content === "string") {
         message.content = rewriteTencentContentFingerprints(message.content, this.product.id);
       }
-    }
-    if (options.system !== void 0 && options.system.length > 0) {
-      messages.unshift({ role: "system", content: options.system });
     }
     if (this.product.id === "workbuddy" && (messages.length === 0 || messages[0].role !== "system")) {
       messages.unshift({ role: "system", content: "You are a helpful assistant." });
@@ -22247,6 +22301,59 @@ async function syncQoderAccountName(options) {
   await options.updateAccount(account.id, { nickname });
 }
 
+// src/core/account-selection.ts
+var AccountSelection = class {
+  constructor(store, findAccount) {
+    this.store = store;
+    this.findAccount = findAccount;
+  }
+  values = /* @__PURE__ */ new Map();
+  loads = /* @__PURE__ */ new Map();
+  writes = /* @__PURE__ */ new Map();
+  get(provider) {
+    if (this.values.has(provider))
+      return Promise.resolve(this.values.get(provider));
+    const existing = this.loads.get(provider);
+    if (existing) return existing;
+    const task = this.store.call("get", "account-selection:" + provider).then((saved) => {
+      if (saved !== void 0 && saved !== null && (typeof saved !== "string" || !saved))
+        throw Error("\u6E20\u9053\u8D26\u53F7\u9009\u62E9\u8BBE\u7F6E\u635F\u574F\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9\u8D26\u53F7");
+      const value = saved ?? null;
+      this.values.set(provider, value);
+      return value;
+    }).finally(() => this.loads.delete(provider));
+    this.loads.set(provider, task);
+    return task;
+  }
+  set(provider, accountId) {
+    const task = (this.writes.get(provider) ?? Promise.resolve()).catch(() => {
+    }).then(async () => {
+      await this.get(provider);
+      if (accountId !== null) this.requireAccount(provider, accountId);
+      await this.store.call(
+        "set",
+        "account-selection:" + provider,
+        accountId
+      );
+      this.values.set(provider, accountId);
+    });
+    this.writes.set(provider, task);
+    void task.finally(() => {
+      if (this.writes.get(provider) === task) this.writes.delete(provider);
+    }).catch(() => {
+    });
+    return task;
+  }
+  requireAccount(provider, accountId) {
+    const account = this.findAccount(accountId);
+    if (!account || account.provider !== provider)
+      throw Error("\u6307\u5B9A\u8D26\u53F7\u4E0D\u5B58\u5728\u6216\u4E0D\u5C5E\u4E8E\u8BE5\u6E20\u9053\uFF0C\u8BF7\u5728\u6E20\u9053\u4E2D\u5FC3\u91CD\u65B0\u9009\u62E9");
+    if (!account.enabled)
+      throw Error("\u6307\u5B9A\u8D26\u53F7\u5DF2\u505C\u7528\uFF0C\u8BF7\u542F\u7528\u8BE5\u8D26\u53F7\u6216\u5728\u6E20\u9053\u4E2D\u5FC3\u91CD\u65B0\u9009\u62E9");
+    return account;
+  }
+};
+
 // vendor/connect/cosy.js
 import { createCipheriv as createCipheriv2, createHash as createHash8, publicEncrypt, randomUUID as randomUUID8 } from "node:crypto";
 import { readFileSync as readFileSync6, writeFileSync as writeFileSync5, mkdirSync as mkdirSync5 } from "node:fs";
@@ -23882,6 +23989,7 @@ async function createDrivers(ctx, { catalog, observer, store }) {
     }
   };
   const pool = new AccountPool(ctx), drivers = /* @__PURE__ */ new Map(), pending = /* @__PURE__ */ new Map();
+  const selection = new AccountSelection(store, (id) => pool.findAccount(id));
   const read = async (a) => {
     const v = await ctx.credentials.resolve(a.credentialRef);
     return v ? parse(v.value) : void 0;
@@ -23918,13 +24026,25 @@ async function createDrivers(ctx, { catalog, observer, store }) {
       };
       const choose = async (provider, model = "", excluded = /* @__PURE__ */ new Set()) => {
         if (provider !== id) throw Error("\u8D26\u53F7\u6C60\u4E0D\u80FD\u8DE8\u6E20\u9053\u9009\u62E9");
+        const requested = observer.context.getStore()?.requestedAccountId;
+        if (requested) {
+          selection.requireAccount(id, requested);
+          if (excluded.has(requested)) return null;
+        }
         const skipped = new Set(excluded);
         for (const a of pool.listAccountsByProvider(id)) {
-          const snapshot = await catalog.load(id + ":" + a.id);
-          if (model && !snapshot.models.some((m) => m.id === model))
+          if (requested && a.id !== requested) {
             skipped.add(a.id);
+            continue;
+          }
+          const snapshot = await catalog.load(id + ":" + a.id);
+          if (model && !snapshot.models.some((m) => m.id === model)) {
+            if (requested) throw Error("\u6307\u5B9A\u8D26\u53F7\u7684\u52A8\u6001\u76EE\u5F55\u4E0D\u652F\u6301\u8BE5\u6A21\u578B\uFF0C\u8BF7\u66F4\u65B0\u6A21\u578B\u6216\u91CD\u65B0\u9009\u62E9\u8D26\u53F7");
+            skipped.add(a.id);
+          }
         }
         const selected = await pool.getAvailableAccount(id, model, skipped);
+        if (!selected && requested) throw Error("\u6307\u5B9A\u8D26\u53F7\u5F53\u524D\u4E0D\u53EF\u7528\uFF1A\u8BE5\u6A21\u578B\u5904\u4E8E\u9650\u6D41\u51B7\u5374\u6216\u51ED\u636E\u4E0D\u53EF\u7528\uFF0C\u8BF7\u5728\u6E20\u9053\u4E2D\u5FC3\u5904\u7406");
         if (selected)
           observer.bindAccount(selected.entry.id, selected.entry.nickname);
         return selected;
@@ -23932,6 +24052,21 @@ async function createDrivers(ctx, { catalog, observer, store }) {
       const runtimePool = new Proxy(pool, {
         get(target, key) {
           if (key === "getAvailableAccount") return choose;
+          if (key === "listAccountsByProvider")
+            return (provider) => {
+              const requested = observer.context.getStore()?.requestedAccountId;
+              return pool.listAccountsByProvider(provider).filter((a) => !requested || a.id === requested);
+            };
+          if (key === "findAccountIdByCredential")
+            return async (provider, identity) => {
+              const bound = observer.context.getStore()?.accountId;
+              const account = bound ? pool.findAccount(bound) : void 0;
+              if (account?.provider === provider) {
+                const credential = await read(account);
+                if (credential?.[provider === "codearts" ? "access_key_id" : "access_token"] === identity) return account.id;
+              }
+              return pool.findAccountIdByCredential(provider, identity);
+            };
           const value = target[key];
           return typeof value === "function" ? value.bind(target) : value;
         }
@@ -24051,8 +24186,9 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         });
       });
       const hydrate = async () => {
+        const requested = await selection.get(id);
         const snapshots = await Promise.all(
-          pool.listAccountsByProvider(id).map((a) => catalog.load(id + ":" + a.id))
+          pool.listAccountsByProvider(id).filter((a) => a.enabled && (!requested || a.id === requested)).map((a) => catalog.load(id + ":" + a.id))
         );
         product.fallbackModels = [
           ...new Map(
@@ -24068,10 +24204,7 @@ async function createDrivers(ctx, { catalog, observer, store }) {
             (a) => catalog.refresh(id + ":" + a.id, () => discover(a))
           )
         );
-        const union = /* @__PURE__ */ new Map();
-        for (const s of results) for (const m of s.models) union.set(m.id, m);
-        product.fallbackModels = [...union.values()];
-        adapter = new Adapter(options);
+        await hydrate();
         try {
           ctx.emit("llm/adapters-updated");
         } catch (e) {
@@ -24080,13 +24213,15 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         return results;
       };
       const visible = async () => {
-        if (!pool.listAccountsByProvider(id).some((a) => a.enabled)) return [];
-        const allowed = /* @__PURE__ */ new Set();
-        for (const a of pool.listAccountsByProvider(id).filter((a2) => a2.enabled))
+        const requested = await selection.get(id);
+        const available = pool.listAccountsByProvider(id).filter((a) => a.enabled && (!requested || a.id === requested));
+        if (available.length === 0) return [];
+        const models = /* @__PURE__ */ new Map();
+        for (const a of available)
           for (const m of (await catalog.load(id + ":" + a.id)).models)
-            allowed.add(m.id);
+            models.set(m.id, m);
         const hidden = pool.disabledModelsFor(id);
-        return product.fallbackModels.filter((m) => allowed.has(m.id) && !hidden.has(m.id)).map((m) => {
+        return [...models.values()].filter((m) => !hidden.has(m.id)).map((m) => {
           const rate = rateLabel(m);
           return {
             ...m,
@@ -24094,6 +24229,13 @@ async function createDrivers(ctx, { catalog, observer, store }) {
             provider: "channel-hub/" + id,
             name: rate === void 0 ? m.name : m.name + " \xB7 " + rate
           };
+        });
+      };
+      const streamWithSelection = async function* (opts, model, run, signal) {
+        const requestedAccountId = await selection.get(id);
+        yield* observer.stream(id, model, run, signal, {
+          ...streamMeta(opts),
+          ...requestedAccountId ? { requestedAccountId } : {}
         });
       };
       const exposed = new Proxy(adapter, {
@@ -24114,22 +24256,20 @@ async function createDrivers(ctx, { catalog, observer, store }) {
               return {
                 ...prepared,
                 model: { ...prepared.model, provider: "channel-hub/" + id },
-                stream: (opts) => observer.stream(
-                  id,
+                stream: (opts) => streamWithSelection(
+                  opts,
                   m,
                   (signal2) => prepared.stream({ ...opts, provider: id, signal: signal2 }),
-                  opts.signal ?? signal,
-                  streamMeta(opts)
+                  opts.signal ?? signal
                 )
               };
             };
           if (k === "stream")
-            return (opts) => observer.stream(
-              id,
+            return (opts) => streamWithSelection(
+              opts,
               opts.model,
               (signal) => adapter.stream({ ...opts, provider: id, signal }),
-              opts.signal,
-              streamMeta(opts)
+              opts.signal
             );
           const value = adapter[k];
           return typeof value === "function" ? value.bind(adapter) : value;
@@ -24299,6 +24439,7 @@ async function createDrivers(ctx, { catalog, observer, store }) {
     };
   }
   return {
+    selection,
     pool,
     drivers,
     login,
@@ -24407,6 +24548,16 @@ async function apply(ctx) {
     [...engine.drivers.values()].filter((d) => d.reload).map((d) => d.reload())
   );
   await engine.hydrate();
+  const orphans = orphanAccounts(
+    await engine.pool.listAllAccounts(),
+    engine.drivers.keys()
+  );
+  if (orphans.length > 0)
+    ctx.logger?.warn?.(
+      `\u6E20\u9053\u4E2D\u5FC3\uFF1A${orphans.length} \u4E2A\u8D26\u53F7\u7684\u6E20\u9053\u672A\u6CE8\u518C\uFF08${[
+        ...new Set(orphans.map((a) => a.provider))
+      ].join("\u3001")}\uFF09\uFF0C\u5DF2\u8DF3\u8FC7\uFF1B\u53EF\u7528 accounts.orphans \u67E5\u770B\u3001accounts.delete \u6E05\u7406`
+    );
   void reload();
   renewal.start();
   balances.start();
@@ -24427,6 +24578,7 @@ async function apply(ctx) {
           canClaim: !!d.claim,
           canBalance: !!d.balance,
           canLogin: true,
+          selectedAccountId: await engine.selection.get(d.id),
           accounts: await Promise.all(
             accounts.filter((a) => a.provider === d.id).map(async (a) => {
               const balance = await store.call("get", "balance:" + a.id);
@@ -24453,6 +24605,16 @@ async function apply(ctx) {
         }))
       );
     }
+    if (method === "channels.selectAccount") {
+      if (typeof p.provider !== "string" || !engine.drivers.has(p.provider))
+        throw Error("Unknown channel");
+      if (p.accountId !== null && (typeof p.accountId !== "string" || !p.accountId))
+        throw Error("Invalid account selection");
+      await engine.selection.set(p.provider, p.accountId);
+      await engine.drivers.get(p.provider)?.hydrate?.();
+      ctx.emit("llm/adapters-updated");
+      return true;
+    }
     if (method === "login.start") return engine.login(String(p.provider), p);
     if (method === "login.poll") {
       const s = engine.pending.get(p.token);
@@ -24473,8 +24635,22 @@ async function apply(ctx) {
       if (!a) throw Error("Unknown account");
       await engine.pool.removeAccount(a.id);
       await credentials.delete?.(a.credentialRef);
+      catalog.forget(a.provider + ":" + a.id);
+      await purgeAccountSnapshots(store, a, ctx.logger);
       ctx.emit("llm/adapters-updated");
       return true;
+    }
+    if (method === "accounts.orphans") {
+      return orphanAccounts(
+        await engine.pool.listAllAccounts(),
+        engine.drivers.keys()
+      ).map((a) => ({
+        id: a.id,
+        provider: a.provider,
+        nickname: a.nickname,
+        enabled: a.enabled,
+        createdAt: a.createdAt
+      }));
     }
     if (method === "accounts.balance" || method === "accounts.claim") {
       const a = engine.pool.findAccount(p.id);

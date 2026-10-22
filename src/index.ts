@@ -13,6 +13,10 @@ import { CheckinService } from "./core/checkin.ts";
 import { MigrationService } from "./migration.ts";
 import { redact, type Account, type Filter } from "./core/types.ts";
 import { creditReading } from "./core/credits.ts";
+import {
+  orphanAccounts,
+  purgeAccountSnapshots,
+} from "./core/account-cleanup.ts";
 import { createDrivers } from "./drivers/ofm.js";
 export const name = "channel-hub";
 export const inject = ["llm", "credentials"];
@@ -100,6 +104,20 @@ export async function apply(ctx: any) {
     );
   // Hydrate saved account directories before starting discovery. Do not publish static vendor tables.
   await engine.hydrate();
+  // Accounts whose channel is not registered in this build are invisible everywhere:
+  // `channels.list` and the model menu both enumerate drivers, and login / renew /
+  // checkin / inference all resolve a driver first. Without this line the only way to
+  // notice them is to open state.json (a leftover account lived 26h that way).
+  const orphans = orphanAccounts(
+    await engine.pool.listAllAccounts(),
+    engine.drivers.keys(),
+  );
+  if (orphans.length > 0)
+    ctx.logger?.warn?.(
+      `渠道中心：${orphans.length} 个账号的渠道未注册（${[
+        ...new Set(orphans.map((a: Account) => a.provider)),
+      ].join("、")}），已跳过；可用 accounts.orphans 查看、accounts.delete 清理`,
+    );
   void reload();
   renewal.start();
   balances.start();
@@ -120,6 +138,7 @@ export async function apply(ctx: any) {
           canClaim: !!d.claim,
           canBalance: !!d.balance,
           canLogin: true,
+          selectedAccountId: await engine.selection.get(d.id),
           accounts: await Promise.all(
             accounts
               .filter((a: Account) => a.provider === d.id)
@@ -148,6 +167,16 @@ export async function apply(ctx: any) {
         })),
       );
     }
+    if (method === "channels.selectAccount") {
+      if (typeof p.provider !== "string" || !engine.drivers.has(p.provider))
+        throw Error("Unknown channel");
+      if (p.accountId !== null && (typeof p.accountId !== "string" || !p.accountId))
+        throw Error("Invalid account selection");
+      await engine.selection.set(p.provider, p.accountId);
+      await engine.drivers.get(p.provider)?.hydrate?.();
+      ctx.emit("llm/adapters-updated");
+      return true;
+    }
     if (method === "login.start") return engine.login(String(p.provider), p);
     if (method === "login.poll") {
       const s = engine.pending.get(p.token);
@@ -168,10 +197,30 @@ export async function apply(ctx: any) {
     if (method === "accounts.delete") {
       const a = engine.pool.findAccount(String(p.id));
       if (!a) throw Error("Unknown account");
+      // Snapshot purge belongs here, not in the pinned vendor pool: `removeAccount`
+      // only unsets the credential and filters the array, leaving catalog / balance /
+      // checkin / identity rows behind forever (see core/account-cleanup.ts).
       await engine.pool.removeAccount(a.id);
       await credentials.delete?.(a.credentialRef);
+      catalog.forget(a.provider + ":" + a.id);
+      await purgeAccountSnapshots(store, a, ctx.logger);
       ctx.emit("llm/adapters-updated");
       return true;
+    }
+    if (method === "accounts.orphans") {
+      // Accounts whose provider has no driver in this build: invisible in
+      // `channels.list` and the model menu, and impossible to use. Reported so they
+      // can be inspected and deleted instead of lingering on disk unnoticed.
+      return orphanAccounts(
+        await engine.pool.listAllAccounts(),
+        engine.drivers.keys(),
+      ).map((a: Account) => ({
+        id: a.id,
+        provider: a.provider,
+        nickname: a.nickname,
+        enabled: a.enabled,
+        createdAt: a.createdAt,
+      }));
     }
     if (method === "accounts.balance" || method === "accounts.claim") {
       const a = engine.pool.findAccount(p.id);

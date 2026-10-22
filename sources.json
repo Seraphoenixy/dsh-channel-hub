@@ -142,6 +142,8 @@
     }
   ],
   "adaptations": [
+    "Tencent fingerprint rules: Nornia first-turn Buddy hy3 live reproduction isolated a second 11128 trigger in the two consecutive Harness Web GUI sentences; insert only a paragraph boundary for that exact pair on buddy CN, preserving WorkBuddy international behavior. Full original system plus 34 tool definitions accepted with OK after this change; see docs/ACCEPTANCE.md",
+    "Buddy adapter: merge GenerateOptions.system before applying the existing OFM Tencent fingerprint rules so both system input paths are covered; synthetic Buddy/WorkBuddy regression coverage, no new live acceptance",
     "LobsterAI credits: locally adapted vendor/ofm/src/lobsterai-credits.ts from the pinned OFM source to accept an explicit zero total with empty creditItems after exhaustion, while retaining failure for missing or invalid totals; synthetic regression tests only",
     "Auth service names and credential references isolated",
     "Per-profile cache paths",

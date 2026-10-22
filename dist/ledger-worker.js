@@ -570,6 +570,16 @@ var LedgerDatabase = class {
       "INSERT INTO kv VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data"
     ).run(key, JSON.stringify(value));
   }
+  /**
+   * 删除一个 kv 键，返回是否真的删掉了一行。
+   *
+   * 只为「账号删除后清理快照」而加（见 `core/account-cleanup.ts`）。键不存在
+   * 返回 0 而不是抛错：清理必须是幂等的 —— 删号可能重试，旧版本留下的孤儿键
+   * 也可能已经被手工清过。
+   */
+  del(key) {
+    return this.db.prepare("DELETE FROM kv WHERE key=?").run(key).changes;
+  }
   close() {
     this.db.close();
     if (this.lock) {
@@ -593,6 +603,7 @@ parentPort.on("message", ({ id, method, args }) => {
       "prune",
       "get",
       "set",
+      "del",
       "close"
     ];
     if (!allowed.includes(method)) throw Error("Unknown database operation");

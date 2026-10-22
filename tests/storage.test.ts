@@ -90,6 +90,20 @@ test("正常握手与回包仍然可用", async () => {
   assert.equal(await pending, 42);
 });
 
+test("kv 删除是幂等的，并如实返回删掉的函数（账号快照清理依赖它）", () => {
+  const db = new LedgerDatabase(":memory:");
+  try {
+    db.set("checkin:acc1", { day: "2026-10-21" });
+    db.set("checkin:acc2", { day: "2026-10-21" });
+    assert.equal(db.del("checkin:acc1"), 1, "存在的键删掉一行");
+    assert.equal(db.del("checkin:acc1"), 0, "重复删除不抛错，返回 0");
+    assert.equal(db.get("checkin:acc1"), undefined);
+    assert.deepEqual(db.get("checkin:acc2"), { day: "2026-10-21" }, "不误删别的键");
+  } finally {
+    db.close();
+  }
+});
+
 test("统计过滤下推后口径不变（日期 / 渠道 / 模型 / 账号）", () => {
   const db = new LedgerDatabase(":memory:");
   const add = (

@@ -4,8 +4,12 @@
 
 ## 已完成
 
+- 渠道级账号选择：新增「使用账号」自动/固定选项与持久化 RPC。固定选择通过请求上下文传递，初始选号与失败换号均排除其他账号；模型菜单随所选账号动态目录收窄。停用、删除、凭据不可用或旧模型不匹配时不静默回退。新增合成真实宿主夹具验证固定 B、自动 A、请求 A 执行中切至 B 的并发归属、限流不换号、停用/删号、失效模型和重启恢复；客户端夹具验证选项与实际提交事件。本次未使用真实账号做多账号推理验收，未修改运行中的 profile。
+- Buddy 系独立 `GenerateOptions.system` 入口修复：先合并独立 system 与消息列表，再统一应用已有精确指纹规则，避免后插入的 system 绕过处理。模拟上游回归验证两个入口同时处理、顺序保持且调用方输入不变；入口修复不能单独解决下述 Nornia 模板拦截。
+- Buddy 国区 Web GUI 模板兼容：对已验证的连续两句只插入句间段落换行，指令文本保持不变；不应用到 WorkBuddy 国际版，不处理用户/工具内容。夹具覆盖精确匹配、幂等性、产品隔离、两个 system 入口和调用方输入不变；真实网络验收单列于下文。
 - TypeScript 核心与管理界面类型检查。
-- 测试总览：93 项核心/目录/续期/迁移/登录协议/热重载辅助测试、11 项错误/用量/余额形状回归测试、4 项客户端测试、3 项真实宿主契约测试。
+- 测试总览（本次完整检查）：115 项核心/目录/续期/迁移/登录协议/热重载辅助测试、28 项错误/用量/余额/签名回归测试、19 项客户端测试、4 项真实宿主契约测试，以及安装包验证。
+- 删号不再留下孤儿快照：`accounts.delete` 在「注销凭据 + 从池里移除」之后补一步按账号清 `catalog:<provider>:<id>` / `balance:<id>` / `checkin:<id>` / `identity:<provider>/<id>` 四类 kv 键，并丢掉目录的内存缓存；单个键清理失败只记一条 warn，不让删号失败（`core/account-cleanup.ts`）。新增 `accounts.orphans` 列出「渠道未注册」（驱动不存在）的账号，并在启动时以一条 warn 报告数量、渠道与查看/清理入口；这类账号不会自动删除，将来渠道装回来仍可用。合成夹具按四个写入方逐条核对键名，覆盖幂等、单键失败隔离与孤儿识别；宿主契约用真实插件 + 临时目录断言「删掉未注册渠道的账号后该账号的四个键全部消失、别的账号的 `checkin:` 行仍在」，以及孤儿账号可被列出并删除。真实遗留背景：删掉 `zcode` 驱动后，账号行与三个快照键在磁盘上又存活了 26 小时，而当时界面上完全看不到它。
 - 数据看板补轮次维度：新增「轮次 / 步数」KPI（含平均步/轮，并标注「按明细保留 90 天」——`daily` 日汇总不存轮次）；流式速度与整块吞吐拆成两张并列卡片，不再挤在一张卡的主值 + 副行里。`stats` 增加 `counts: { turns, steps }`，按当前筛选范围从 `requests` 现算，既有的 totals / series / accounts 口径不变。
 - 记账故障不得拖住推理：`WorkerStore` 补齐初始化失败（工作线程在 `ready` 之前退出/抛错时 `ready` 立即拒绝）、单次调用超时（默认 5 秒，`DSH_CHANNEL_HUB_STORE_TIMEOUT_MS` 可调）与未完成调用上限（默认 200，`DSH_CHANNEL_HUB_STORE_MAX_PENDING` 可调）。超时/超限即失败并摘除待处理项，迟到的回包不会二次结算；观察者把它计为 `failedWrites` 后继续，模型输出不受影响。夹具用可注入的替身工作线程覆盖三条路径与正常握手。
 - 请求收尾不再漏：观察者的上游迭代器创建移入 `try` —— 驱动同步抛错（凭据缺失、参数校验、适配器异常）也会走 `finally`，请求落成 `failed`、写入 `finish`，并释放活跃槽位（`isIdle()` 为真），不会卡住关闭与热重载。
@@ -48,7 +52,8 @@
 以下均使用本机已保存的真实账号，只读或最小请求，未改写运行 profile、未续期、未写凭据或账号池。
 
 - **Buddy / WorkBuddy 最小推理**：实时远端目录 Buddy 国区 31 个模型、WorkBuddy 国际版 28 个；两端均选目录确认的 `hy3`。Buddy 普通 system 与含触发句的 system 各请求一次，均 HTTP 200、正文 `OK.`。WorkBuddy 在 64 token 上限下 HTTP 200 但无正文（未计成功），调整为 512 token / low 思考档后两次均 HTTP 200、正文 `OK.`。
-- **Harness system 身份句**：Harness 发起的 Buddy `hy3` 请求报 HTTP 400 / `code:11128`；逐段缩小到首句 `You are an AI agent powered by DeepSeek Harness.`，该句单独发送同样 400。仅把 `powered by` 改成 `running in` 后，单句与完整 5764 字符 system 都返回 HTTP 200、正文 `OK.`；据此新增这一条精确模板兼容规则，未引入泛化关键词清洗。修复后经真实宿主 `LlmRuntime.prepareCall → stream` 重放原始 system，输出 `OK.`，账本 outcome 为 success、物理尝试数为 1。新规则的真实网络证据限 Buddy 国区 `hy3`；WorkBuddy 国际版对新句只有夹具覆盖。
+- **Harness system 身份句（验收范围纠正）**：此前记录过将 `You are an AI agent powered by DeepSeek Harness.` 中的 `powered by` 改成 `running in` 后通过，但同日 Nornia 首轮故障的重新验证推翻了“身份句改写已足够使完整模板通过”的结论；不再以此前的完整模板验收作为当前可用性证据。身份句规则保留，当前正式对话以后一项复验为准。
+- **Nornia 首轮 Buddy 国区拦截复验**：只读会话记录确认路由为 `channel-hub/buddy`、模型 `hy3`，用户第一条正式对话即失败；同会话的标题后台请求成功不计作正式对话成功。在用户分两次明确授权后，向 `copilot.tencent.com` 执行 3 次对照与 24 次定位/验收请求：中性 system 返回 200/OK；仅改写身份句的 5764 字符原系统模板无工具/带 34 个工具均 400（unapproved channel）。缩小到 Web GUI 说明前两句，221 字符原句对单独请求也 400；在两句间仅将一个空格改成两个换行、连同既有身份句改写，完整 5765 字符 system 加原 34 个工具、`max_tokens=512`、low 思考返回 200，正文 `OK`。定位请求上限 64 token，用户消息均为合成“回复 OK”，未重放聊天历史、未刷新或修改凭据、未写正在运行的 profile。此项是真实网络适配器验收，探针输出上限为 512；用户随后确认实际 DSH 界面已正常回复 OK，只读账本同时确认原 Nornia 失败会话于北京时间 19:29:36 的 Buddy hy3 请求 outcome=success。国际版新规则不启用。
 - **Trae 缓存用量**：真实 Trae CN IDE 账号、远端确认的 `glm-5.3-flash`，两次相同合成 system 的 `token_usage` 分别为 `prompt_tokens=2727 / cache_read=0` 与 `2727 / 2688`。修复把 `cache_read_input_tokens` / `cache_creation_input_tokens` 映射到 DSH 的缓存字段并从含缓存的 `prompt_tokens` 中扣除，保留 `total_tokens`；`*_total` 零占位不覆盖本次计数，显式零保留、缺失或非法值维持未知。真实复测两次均输出 `OK.`，宿主与账本记录 input=39 / cacheRead=2688 / cacheWrite=0，单请求命中率 98.6%。
 - **Qoder 国区/国际版用户名补齐**：原有两个账号凭据均缺 nickname、账号标签等于随机账号 id。修复在目录发现时补齐空白或等于账号 id 的生成标签：优先取凭据 nickname，否则走对应区域 `/api/v1/userinfo`（20 秒超时），`name` 为空时回退非空 `username`；保留自定义名称，不写凭据或设备字段。真实两个账号只读查询后 `upstreamNamePresent=true`、`displayIsGenerated=false`、`matchesUpstream=true`、`credentialRefUnchanged=true`。
 - **额度轮询与自动续期**：宿主 BalanceService 启动即检查、后台每 30 秒扫描、单账号 5 分钟内复用读数；失败保留上次成功值并按 30 秒指数退避至 30 分钟。真实观察：五个账号均出现构建之后的成功额度更新时间，无 error/retryAt。5 分钟周期与退避由模拟时钟测试验证，未等待完整真实周期，也未制造真实凭据过期。

@@ -21,6 +21,15 @@ export class CatalogService {
     }
     return this.cache.get(key) ?? { models: [], updated: 0, stale: true };
   }
+  /**
+   * 丢掉一个键的内存缓存（删号时调用）。
+   *
+   * 不丢的后果：同一账号 id 重新登录后 `hydrate()` 会先命中这份旧缓存，把上一个
+   * 账号的模型目录带回来 —— 此时磁盘上的行已经被 `purgeAccountSnapshots` 清掉了。
+   */
+  forget(key: string) {
+    this.cache.delete(key);
+  }
   refresh(key: string, fetcher: () => Promise<Model[]>): Promise<Snapshot> {
     const existing = this.inflight.get(key);
     if (existing) return existing;

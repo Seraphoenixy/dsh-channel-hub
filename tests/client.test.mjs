@@ -32,6 +32,236 @@ const decoded = source
  * 转义的字符串，正则跨行匹配会失效。另有一条测试单独确认它被内联进产物。
  */
 const css = readFileSync(new URL("../src/client.css", import.meta.url), "utf8");
+
+function renderChannelFixture(selectedAccountId = "b") {
+  const channel = {
+    id: "buddy",
+    name: "Buddy",
+    selectedAccountId,
+    accounts: [
+      {
+        id: "a",
+        nickname: "Account A",
+        enabled: true,
+        catalog: { models: [] },
+      },
+      {
+        id: "b",
+        nickname: "Account B",
+        enabled: false,
+        catalog: { models: [] },
+      },
+    ],
+  };
+  let definition,
+    stateIndex = 0;
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props, children }),
+    Fragment: "fragment",
+    useState: (initial) => [stateIndex++ === 1 ? [channel] : initial, () => {}],
+    useRef: (value) => ({ current: value }),
+    useEffect() {},
+  };
+  vm.runInNewContext(source, {
+    window: {
+      __ModuleLoader__: {
+        load(d) {
+          definition = d;
+        },
+      },
+    },
+    document: { hidden: false },
+    setInterval,
+    clearInterval,
+    setTimeout,
+  });
+  const views = new Map(),
+    calls = [];
+  const plugin = definition.factory(() => React);
+  plugin.apply({
+    slots: {
+      inject(_name, callback) {
+        callback();
+      },
+      register(meta, view) {
+        views.set(meta.name, view);
+      },
+    },
+    connection: {
+      rpc: {
+        async call(_api, _service, request) {
+          calls.push(request);
+          return { value: request.method === "channels.list" ? [channel] : {} };
+        },
+      },
+    },
+  });
+  const page = views.get("main")({});
+  const tree = page.type(page.props);
+  return { tree, calls };
+}
+function nodes(tree) {
+  if (!tree || typeof tree !== "object") return [];
+  if (Array.isArray(tree)) return tree.flatMap(nodes);
+  return [tree, ...nodes(tree.children)];
+}
+
+function renderChannels(channels) {
+  // 与 renderChannelFixture 同构，但可以注入任意渠道数组（多跨列卡场景用）。
+  let definition,
+    stateIndex = 0;
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props, children }),
+    Fragment: "fragment",
+    useState: (initial) => [stateIndex++ === 1 ? channels : initial, () => {}],
+    useRef: (value) => ({ current: value }),
+    useEffect() {},
+  };
+  vm.runInNewContext(source, {
+    window: {
+      __ModuleLoader__: {
+        load(d) {
+          definition = d;
+        },
+      },
+    },
+    document: { hidden: false },
+    setInterval,
+    clearInterval,
+    setTimeout,
+  });
+  const views = new Map();
+  const plugin = definition.factory(() => React);
+  plugin.apply({
+    slots: {
+      inject(_name, callback) {
+        callback();
+      },
+      register(meta, view) {
+        views.set(meta.name, view);
+      },
+    },
+    connection: {
+      rpc: {
+        async call(_api, _service, request) {
+          return { value: request.method === "channels.list" ? channels : {} };
+        },
+      },
+    },
+  });
+  const page = views.get("main")({});
+  return page.type(page.props);
+}
+
+function renderedChannelNames(tree) {
+  const grid = nodes(tree).find(
+    (n) => n.props?.className === "chub-channels",
+  );
+  if (!grid) return [];
+  return nodes(grid.children)
+    .filter((n) => n.props?.className === "chub-channel")
+    .map((n) => n.props?.key);
+}
+
+function channel(id, accountCount) {
+  return {
+    id,
+    name: id,
+    accounts: Array.from({ length: accountCount }, (_, i) => ({
+      id: id + "-" + i,
+      nickname: id + " " + i,
+      enabled: true,
+      catalog: { models: [] },
+    })),
+  };
+}
+
+test("channel cards are packed so multi-account cards never strand a row", () => {
+  // 用户 2026-10-22 报障（带截图）：真实顺序是「华为码道(1) → CodeBuddy(2)」，
+  // 2 列下跨列卡放不进行尾那一格，被顶到第 2 行，第 1 行右边空了一大块（1-2-1）。
+  //
+  // 修法不是 `dense`（它会让视觉顺序偏离 DOM 顺序），而是渲染前按**实际列数**
+  // 把卡片装成满行。`packChannels` 在列数 > 1 时把跨列卡提前，并让 3 列布局
+  // 里它后面跟一张单列卡补齐。
+  const channels = [
+    channel("a-single", 1),
+    channel("b-wide", 2),
+    channel("c-single", 1),
+    channel("d-single", 1),
+  ];
+  // 列数由 ResizeObserver 实测；测试环境没有 DOM，故 gridColumns 保持初始值 1，
+  // 此时 `packChannels` 原样返回 —— 先确认不改顺序这条底线。
+  assert.deepEqual(
+    renderedChannelNames(renderChannels(channels)),
+    ["a-single", "b-wide", "c-single", "d-single"],
+    "with a single column the host order must be preserved verbatim",
+  );
+});
+
+test("packChannels fills rows around spanning cards", () => {
+  // ⚠️ 测的是**构建产物里的真实实现**，不是复刻逻辑：从 dist/client.js 里抠出
+  // `packChannels` 的函数体求值。复刻一份逻辑会在改动时悄悄漂移 —— 测试仍然
+  // 绿，行为却已经变了（这类「影子实现」比没有测试更危险）。
+  const start = source.indexOf("function packChannels");
+  assert.ok(start > 0, "the built bundle must contain packChannels");
+  const body = source.slice(start, source.indexOf("\n      function Page", start));
+  assert.ok(body.length > 0, "could not extract packChannels from the bundle");
+  const pack = vm.runInNewContext("(" + body.trim().replace(/^function packChannels/, "function") + ")");
+
+  const list = [
+    channel("a", 1),
+    channel("b", 2),
+    channel("c", 1),
+    channel("d", 1),
+    channel("e", 2),
+  ];
+  const ids = (result) => JSON.stringify(result.map((c) => c.id));
+  // 用 JSON 比较而不是 deepEqual：`pack` 在另一个 vm 上下文里执行，返回的数组
+  // 原型与当前 realm 不同，deepStrictEqual 会因此失败（值其实一样）。
+  const expect = (value) => JSON.stringify(value);
+
+  // 2 列：跨列卡占满整行（perWide = 0），剩余单列卡按原顺序排在后面。
+  assert.equal(ids(pack(list, 2)), expect(["b", "e", "a", "c", "d"]));
+  // 3 列：跨列卡占 2 格，后面跟 1 张单列卡补齐这一行。
+  assert.equal(ids(pack(list, 3)), expect(["b", "a", "e", "c", "d"]));
+  // 4 列：跨列卡后面跟 2 张单列卡。
+  assert.equal(ids(pack(list, 4)), expect(["b", "a", "c", "e", "d"]));
+  // 单列：原样返回，绝不重排。
+  assert.equal(ids(pack(list, 1)), expect(["a", "b", "c", "d", "e"]));
+  // 没有跨列卡：原样返回。
+  assert.equal(
+    ids(pack([channel("x", 1), channel("y", 1), channel("z", 1)], 3)),
+    expect(["x", "y", "z"]),
+  );
+  // 单张卡 / 空列表：不炸。
+  assert.equal(ids(pack([channel("solo", 1)], 3)), expect(["solo"]));
+  assert.equal(ids(pack([], 3)), expect([]));
+});
+
+test("channel account selector renders unavailable selection and sends explicit or auto choice", async () => {
+  const { tree, calls } = renderChannelFixture();
+  const selector = nodes(tree).find(
+    (n) => n.type === "select" && n.props?.["aria-label"] === "Buddy 使用账号",
+  );
+  assert.ok(selector);
+  assert.equal(selector.props.value, "b");
+  const options = nodes(selector).filter((n) => n.type === "option");
+  assert.equal(options.find((n) => n.props.value === "b").props.disabled, true);
+  assert.ok(options.some((n) => n.props.value === ""));
+  await selector.props.onChange({ target: { value: "a" } });
+  await selector.props.onChange({ target: { value: "" } });
+  const selections = calls.filter((c) => c.method === "channels.selectAccount");
+  assert.equal(selections[0].payload.provider, "buddy");
+  assert.equal(selections[0].payload.accountId, "a");
+  assert.equal(selections[1].payload.accountId, null);
+  const deleted = renderChannelFixture("deleted");
+  assert.ok(
+    nodes(deleted.tree).some(
+      (n) =>
+        n.type === "option" && n.props?.value === "deleted" && n.props.disabled,
+    ),
+  );
+});
 test("built client registers one channel-hub section with explicit service dependencies", () => {
   let definition;
   const element = (type, props, ...children) => ({ type, props, children });
@@ -148,10 +378,7 @@ test("panel auto-refresh backs off after a failed round", () => {
 test("daily chart axis lays labels out per bar slot", () => {
   // 原来用 flex + space-between 把首尾标签顶到卡片两端，比柱子各偏半格；
   // 现在按柱数等分成网格，每格居中。
-  assert.ok(
-    decoded.includes(".chub-axis{display:grid"),
-    "axis must be a grid",
-  );
+  assert.ok(decoded.includes(".chub-axis{display:grid"), "axis must be a grid");
   assert.ok(
     decoded.includes("gridTemplateColumns"),
     "axis must repeat one column per bar",
@@ -164,10 +391,7 @@ test("package rows show the upstream expiry inline, not only in a hover title", 
   // 用户必须逐行悬停才看得到；现在同时渲染在包标题行上。
   assert.ok(source.includes("chub-pkgwhen"), "missing inline expiry element");
   for (const label of ["到期 ", "周期至 "])
-    assert.ok(
-      source.includes(escape(label)),
-      "missing expiry label: " + label,
-    );
+    assert.ok(source.includes(escape(label)), "missing expiry label: " + label);
 });
 
 test("the panel fills the window while only the body scrolls", () => {
@@ -292,7 +516,8 @@ test("breakpoints follow the container, not the viewport", () => {
     "the container must establish an inline-size query context",
   );
   // 内容分栏不得再出现在视口媒体查询块里（只有容器自身的内边距可以按窗口收窄）。
-  const viewportBlocks = css.match(/@media \(max-width:[^)]*\)\{[\s\S]*?\n\}/g) ?? [];
+  const viewportBlocks =
+    css.match(/@media \(max-width:[^)]*\)\{[\s\S]*?\n\}/g) ?? [];
   for (const block of viewportBlocks)
     for (const cls of ["chub-channels", "chub-kpis"])
       assert.ok(
@@ -358,15 +583,87 @@ test("channel card actions sit on the stats row, pushed to the right edge", () =
     "space-between would make button position depend on how many stats there are",
   );
   // 结构上，按钮组必须真的嵌在统计行里 —— 只加 CSS 而 JSX 仍是兄弟节点无效。
-  assert.match(
-    decoded,
-    /className: "chub-chanmeta"[\s\S]{0,2400}?className: "chub-chanacts"/,
+  const statsRow = nodes(renderChannelFixture().tree).find(
+    (n) => n.props?.className === "chub-chanmeta",
+  );
+  assert.ok(
+    statsRow?.children.some((n) => n?.props?.className === "chub-chanacts"),
     "the actions must be rendered inside the stats row, not as a sibling",
   );
   // 且不得再出现「统计行结束后紧跟一行按钮组」的旧结构。
   assert.ok(
     !/className: "chub-chanactions"/.test(decoded),
     "no leftover standalone action row class",
+  );
+});
+
+test("multi-account channel cards span two columns and lay their accounts side by side", () => {
+  // 用户 2026-10-22：「有的有两个账号、有的单账号留下很多空隙」。
+  //
+  // 根因不是间距：账号块是纵向列表，多一个账号就多一整块（约 200px），而网格
+  // 按行对齐 —— 1440px 实测同排单账号卡下方共 634px 死白，其中 502px 仅来自
+  // 「双账号卡与单账号卡同排」。做法是让多账号卡跨两列、账号在卡内并排，
+  // 高度差被宽度吸收（见 docs/LAYOUT.md）。
+  assert.ok(
+    /\.chub-channels\{[^}]*align-items:stretch/.test(css),
+    "the grid must stretch rows, or short cards leave the hole below themselves",
+  );
+  assert.ok(
+    /\.chub-channel\[data-multi\]\{[^}]*grid-column:span 2/.test(css),
+    "a card with 2+ accounts must span two columns",
+  );
+  assert.ok(
+    /\.chub-channel\[data-multi\]>\.chub-acctlist\{[^}]*display:grid/.test(css),
+    "the account list must switch to a grid so accounts sit side by side",
+  );
+  assert.ok(
+    /\.chub-channel\[data-multi\]>\.chub-acctlist\{[^}]*grid-auto-rows:1fr/.test(css),
+    "equal row heights keep the action rows of sibling accounts aligned",
+  );
+  // 卡片要吃满行高，内部的伸缩子项才有空间可分。
+  assert.ok(
+    /\.chub-channel\{[^}]*height:100%/.test(css),
+    "the card itself must fill the stretched row",
+  );
+  // 组件必须真的输出这个属性 —— 只写 CSS 不会命中任何卡片。
+  assert.ok(
+    /"data-multi": accounts\.length > 1/.test(decoded),
+    "the channel card must emit data-multi when it has more than one account",
+  );
+});
+
+test("single-column layouts reclaim the column span", () => {
+  // ⚠️ `grid-column:span 2` 在只有 1 列的网格里会造出**隐式第二列**：卡片只占
+  // 半宽、右边留一条等高的白，比原来的洞更糟（780px 实测稳定复现）。
+  // 这条兜底不能省，且必须写在容器查询里 —— 判断依据是**真实可用宽度**，
+  // 不是视口宽度（带侧栏时两者差很多）。
+  const single = css.match(
+    /@container chub \(max-width:820px\)\{([\s\S]*?)\n\}/,
+  )?.[1];
+  assert.ok(single, "the 820px container query must still exist");
+  assert.ok(
+    /\.chub-channel\[data-multi\]\{[^}]*grid-column:auto/.test(single),
+    "the span must be dropped in the single-column layout",
+  );
+});
+
+test("stretched cards hand their slack to the account box, not to the card bottom", () => {
+  // 行内等高只是把洞从「卡片之间」搬到「卡片内部」。必须再给剩余高度一个去处，
+  // 否则卡底就是一块白：
+  //  - 账号列表吃掉剩余高度；
+  //  - 操作行被推到账号框底边；
+  //  - 0 账号渠道的空状态占满剩余高度并居中。
+  assert.ok(
+    /\.chub-acctlist\{[^}]*flex:1 1 auto/.test(css),
+    "the account list must absorb the leftover height",
+  );
+  assert.ok(
+    /\.chub-acctacts\{[^}]*margin-top:auto/.test(css),
+    "the action row must sit at the bottom of the account box",
+  );
+  assert.ok(
+    /\.chub-channel>\.chub-empty\{[^}]*flex:1 1 auto/.test(css),
+    "the empty state must fill the stretched card instead of leaving a blank band",
   );
 });
 
@@ -423,7 +720,11 @@ test("the stylesheet lives in its own file and is inlined as a string", () => {
     "the CSS template literal must not come back; move it to client.css",
   );
   assert.ok(css.length > 5000, "client.css should hold the real stylesheet");
-  for (const marker of [".chub-hero{", "::-webkit-scrollbar-thumb", "@container chub"])
+  for (const marker of [
+    ".chub-hero{",
+    "::-webkit-scrollbar-thumb",
+    "@container chub",
+  ])
     assert.ok(
       source.includes(marker),
       "the built bundle must inline the stylesheet; missing " + marker,
@@ -483,7 +784,10 @@ test("every provider keeps a visible sliver in the daily chart", () => {
   );
   // 每个渠道都留有可见的一笔。
   for (const [i, h] of heights.entries())
-    assert.ok(h >= MIN - 1e-9, `segment ${i} is ${h}px, below the ${MIN}px floor`);
+    assert.ok(
+      h >= MIN - 1e-9,
+      `segment ${i} is ${h}px, below the ${MIN}px floor`,
+    );
   // 大段可以轻微压缩，但不能压到下限以下、也不能反过来超过比例。
   assert.ok(heights[0] < (day[0] / day.reduce((a, b) => a + b, 0)) * BAR);
   assert.ok(heights[0] > heights[1], "relative order must be preserved");

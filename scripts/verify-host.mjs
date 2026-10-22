@@ -18,7 +18,7 @@ for (const name of [
 }
 const result = spawnSync(
   process.execPath,
-  ["--test", "tests/host.test.mjs", "tests/gemini-signature-host.test.mjs"],
+  ["--test", "tests/host.test.mjs", "tests/gemini-signature-host.test.mjs", "tests/account-selection-host.test.mjs"],
   { stdio: "inherit" },
 );
 process.exit(result.status ?? 1);

@@ -109,6 +109,42 @@ window.__ModuleLoader__.load({
       return { text: date(n), tone: "" };
     };
     /**
+     * 把渠道卡按**列数装成满行**，只决定渲染顺序，不动数据。
+     *
+     * 为什么需要它：2 个以上账号的卡要跨两列（`.chub-channel[data-multi]`），而
+     * CSS 网格**不会把跨列卡塞进行尾剩下的那一格** —— 它只能整体换到下一行。
+     * 于是只要「单列卡 + 跨列卡」凑不满一行，就会出现一整格空白。用户截图里的
+     * `1-2-1` 正是这个：第 1 行 1 张单列卡，第 2 张是跨列卡放不下，被顶到第 2 行，
+     * 第 1 行右侧空了一大块。
+     *
+     * 做法：跨列卡后面**紧跟**足够数量的单列卡把这一行填满。
+     *  - `columns = 2`：跨列卡独占一行（后面不跟），剩余单列卡两两成行；
+     *  - `columns >= 3`：跨列卡占 2 格，后面跟 `columns - 2` 张单列卡补齐。
+     *
+     * 只做「行与行之间」的重排，同一类卡内部仍保持宿主顺序。
+     *
+     * @param list - 宿主返回的渠道数组。
+     * @param columns - 网格实测列数（见 `gridColumns`）。
+     * @returns 渲染顺序；列数 ≤ 1 或没有跨列卡时原样返回。
+     */
+    function packChannels(list: any[], columns: number): any[] {
+      if (columns <= 1 || list.length <= 1) return list;
+      const wide = list.filter((c) => (c.accounts?.length ?? 0) > 1);
+      if (wide.length === 0) return list;
+      const narrow = list.filter((c) => (c.accounts?.length ?? 0) <= 1);
+      // 一张跨列卡之后还能塞下几张单列卡：2 列时 0（它已占满整行）。
+      const perWide = Math.max(0, columns - 2);
+      const out: any[] = [];
+      let cursor = 0;
+      for (const card of wide) {
+        out.push(card);
+        for (let i = 0; i < perWide && cursor < narrow.length; i++)
+          out.push(narrow[cursor++]);
+      }
+      while (cursor < narrow.length) out.push(narrow[cursor++]);
+      return out;
+    }
+    /**
      * 整个渠道中心页面。
      *
      * 唯一入口是宿主的整窗主区域（`main` keyed slot，`width:100%;height:100%`），
@@ -140,6 +176,15 @@ window.__ModuleLoader__.load({
        * `login.start`（模式 `sms`），宿主侧协议不变。
        */
       const [smsLogin, setSmsLogin] = useState(null as any);
+      /**
+       * 渠道网格当前排了几列（`1` 表示单列）。
+       *
+       * 用途只有一个：把卡片**按实际列数装成满行**（见 `packChannels`）。列数
+       * 由容器宽度决定，所以不能用视口宽度猜；这里直接量
+       * `grid-template-columns` 解析出轨道数。
+       */
+      const [gridColumns, setGridColumns] = useState(1);
+      const gridRef = useRef(null as any);
       const sequence = useRef(0);
       const loginTimers = useRef(new Set<ReturnType<typeof setInterval>>());
       useEffect(
@@ -150,6 +195,46 @@ window.__ModuleLoader__.load({
         },
         [],
       );
+      /**
+       * 量出渠道网格的真实列数并跟随容器宽度变化。
+       *
+       * ⚠️ 不能按视口宽度算：宿主的侧栏、页边距都会吃掉宽度，`@container` 断点
+       * 也是按**内容区**判的。直接读计算样式的 `grid-template-columns`，把它
+       * 解析成轨道数，才是布局真正用的那个数字。
+       */
+      useEffect(() => {
+        const element = gridRef.current;
+        if (!element) return;
+        const measure = () => {
+          const value = getComputedStyle(element).gridTemplateColumns;
+          // 单列时 Chromium 给的是像素值（"1156px"），多列才是空格分隔的列表。
+          const tracks = value.trim().split(/\s+/).filter(Boolean).length;
+          setGridColumns((current: number) => {
+            const next = tracks > 0 ? tracks : 1;
+            // 只在真的变化时 setState：ResizeObserver 会频繁回调，无条件 set
+            // 会把页面打进「测量 → 重渲染 → 再测量」的循环。
+            return current === next ? current : next;
+          });
+        };
+        measure();
+        /**
+         * ⚠️ `measure()` 在首次 effect 里可能读到 `none` 或 0 宽（网格刚挂载、
+         * 或宿主还在布局）。ResizeObserver 的首次回调有时**早于**第一次真正
+         * 布局，于是列数会一直停在 1，`packChannels` 就整段失效。补一帧再测。
+         */
+        let frame = 0;
+        if (typeof requestAnimationFrame === "function")
+          frame = requestAnimationFrame(measure);
+        if (typeof ResizeObserver === "undefined") return () => {
+          if (frame) cancelAnimationFrame(frame);
+        };
+        const observer = new ResizeObserver(measure);
+        observer.observe(element);
+        return () => {
+          if (frame) cancelAnimationFrame(frame);
+          observer.disconnect();
+        };
+      }, []);
       const rpc = async (method: string, payload: any = {}) => {
         const result = await ctx.connection.rpc.call("/api", "channel-hub", {
           version: 1,
@@ -440,7 +525,9 @@ window.__ModuleLoader__.load({
                   ...row.map((v, j) => {
                     // 次要列在窄容器里整列隐藏（见 CSS 的 lowpri 规则）。
                     const classes = [
-                      ...(low !== undefined && low.includes(j) ? ["lowpri"] : []),
+                      ...(low !== undefined && low.includes(j)
+                        ? ["lowpri"]
+                        : []),
                       ...(j === last
                         ? []
                         : wide.includes(j)
@@ -817,7 +904,9 @@ window.__ModuleLoader__.load({
       const totals = stats?.totals;
       // 轮次 / 步数只在明细保留期内可算（`daily` 日汇总不含轮次），界面上要写明。
       const counts = stats?.counts ?? { turns: 0, steps: 0 };
-      const stepsPerTurn = counts.turns ? counts.steps / counts.turns : undefined;
+      const stepsPerTurn = counts.turns
+        ? counts.steps / counts.turns
+        : undefined;
       const accountTotal = channels.reduce(
         (n: number, c: any) => n + (c.accounts?.length ?? 0),
         0,
@@ -832,6 +921,20 @@ window.__ModuleLoader__.load({
         for (const a of c.accounts ?? [])
           for (const m of a.catalog?.models ?? []) modelIds.add(m.id);
       const failedChannels = channels.filter((c: any) => c.error).length;
+      /**
+       * 渠道卡的**渲染顺序**：由 `packChannels` 按实际列数装箱决定。
+       *
+       * ⚠️ 这是布局的一部分，不是化妆：2 个以上账号的卡跨两列，而 CSS 网格
+       * **不会把它塞进行尾剩下的那一格**，只能整体换行 —— 于是「单列卡 + 跨列卡」
+       * 凑不满一行时，前一行右侧就空一整格（用户截图里的 `1-2-1`：华为码道
+       * 独占第 1 行，跨列的 CodeBuddy 被顶到第 2 行）。
+       *
+       * ⚠️ 必须**真的重排 DOM 顺序**，不能用 CSS `order` 或
+       * `grid-auto-flow:dense`：那两者让视觉顺序偏离 DOM 顺序，Tab 焦点、
+       * 读屏顺序、`Ctrl+F` 的阅读路径都会与实际位置错位（`dense` 实测还会把
+       * 后面的单列卡提到跨列卡前面，顺序更乱）。
+       */
+      const orderedChannels = packChannels(channels, gridColumns);
       const series = stats?.series ?? [];
       /**
        * 每日 × 渠道的交叉数据（宿主在 `stats.dailyByProvider` 给出）。
@@ -897,8 +1000,7 @@ window.__ModuleLoader__.load({
           .filter((row) => String(row.day) === dayId)
           .map((row) => ({
             provider: String(row.provider),
-            tokens:
-              typeof row.totalTokens === "number" ? row.totalTokens : 0,
+            tokens: typeof row.totalTokens === "number" ? row.totalTokens : 0,
           }))
           .filter((segment) => segment.tokens > 0);
       const maxTokens = Math.max(
@@ -1252,11 +1354,15 @@ window.__ModuleLoader__.load({
                 ),
               h(
                 "div",
-                { className: "chub-channels" },
-                ...channels.map((c: any) => {
+                { className: "chub-channels", ref: gridRef },
+                ...orderedChannels.map((c: any) => {
                   const accounts = c.accounts ?? [];
                   const catalogModels = new Set<string>();
-                  for (const a of accounts)
+                  for (const a of accounts.filter(
+                    (a: any) =>
+                      a.enabled &&
+                      (!c.selectedAccountId || a.id === c.selectedAccountId),
+                  ))
                     for (const m of a.catalog?.models ?? [])
                       catalogModels.add(m.id);
                   const latest = Math.max(
@@ -1279,6 +1385,21 @@ window.__ModuleLoader__.load({
                       key: c.id,
                       className: "chub-channel",
                       "data-state": state,
+                      /**
+                       * 2 个以上账号的卡片跨两列（样式见 client.css 的
+                       * `.chub-channel[data-multi]`）。
+                       *
+                       * 账号块是纵向列表，多一个账号就多一整块，于是「双账号
+                       * 卡」比「单账号卡」高约 200px；网格按行对齐，同排的
+                       * 单账号卡下面就是一块死白（1440px 实测 634px）。跨列后
+                       * 账号在卡内并排，高度差被宽度吸收。
+                       *
+                       * ⚠️ 用显式属性而不是让 CSS 写 `:has(.chub-acct +
+                       * .chub-acct)`：那会把布局分支绑在标记结构上 —— 账号
+                       * 列表里插入任何兄弟元素（错误提示、分组标题、滚动容器）
+                       * 都会让 `+` 失效，卡片静默退回单列。
+                       */
+                      "data-multi": accounts.length > 1 ? "" : undefined,
                       style: { "--chan-accent": accentOf(c.id) } as any,
                     },
                     h(
@@ -1323,6 +1444,60 @@ window.__ModuleLoader__.load({
                     h(
                       "div",
                       { className: "chub-chanmeta" },
+                      h(
+                        "label",
+                        { className: "chub-account-choice" },
+                        h("span", null, "使用账号"),
+                        h(
+                          "select",
+                          {
+                            "aria-label": c.name + " 使用账号",
+                            value: c.selectedAccountId ?? "",
+                            disabled: busy,
+                            title:
+                              "对该渠道后续请求生效；指定账号时不会自动换号",
+                            onChange: (e: any) =>
+                              action("channels.selectAccount", {
+                                provider: c.id,
+                                accountId: e.target.value || null,
+                              }),
+                          },
+                          h("option", { value: "" }, "自动选择"),
+                          c.selectedAccountId &&
+                            !accounts.some(
+                              (a: any) => a.id === c.selectedAccountId,
+                            ) &&
+                            h(
+                              "option",
+                              { value: c.selectedAccountId, disabled: true },
+                              "指定账号已删除，请重新选择",
+                            ),
+                          ...accounts.map((a: any) =>
+                            h(
+                              "option",
+                              {
+                                key: a.id,
+                                value: a.id,
+                                disabled: !a.enabled,
+                              },
+                              (a.nickname || a.id) +
+                                (a.nickname &&
+                                accounts.filter(
+                                  (other: any) => other.nickname === a.nickname,
+                                ).length > 1
+                                  ? " · " + a.id.slice(-6)
+                                  : "") +
+                                (a.enabled ? "" : "（已停用）"),
+                            ),
+                          ),
+                        ),
+                        c.selectedAccountId &&
+                          h(
+                            "span",
+                            { className: "muted" },
+                            "固定使用，不自动换号",
+                          ),
+                      ),
                       h(
                         "span",
                         null,
@@ -1890,8 +2065,7 @@ window.__ModuleLoader__.load({
                         [
                           "整块吞吐",
                           fmt(totals.avgThroughput, 1) + " tok/s",
-                          fmt(totals.throughputSamples) +
-                            " 样本 · 含首字等待",
+                          fmt(totals.throughputSamples) + " 样本 · 含首字等待",
                         ],
                         [
                           "缓存命中率",
@@ -1971,10 +2145,7 @@ window.__ModuleLoader__.load({
                             ...series.map((day: any, i: number) => {
                               const slot = 1000 / series.length;
                               // 天数少时柱子别铺满整格，居中并限宽。
-                              const width = Math.min(
-                                Math.max(1, slot - 2),
-                                36,
-                              );
+                              const width = Math.min(Math.max(1, slot - 2), 36);
                               const x = i * slot + (slot - width) / 2;
                               const segments = daySegments(String(day.id));
                               /*
@@ -2001,8 +2172,7 @@ window.__ModuleLoader__.load({
                                     height,
                                     rx: 3,
                                     className: "chub-bar",
-                                    fill:
-                                      "color-mix(in srgb,var(--chub-accent) 68%,transparent)",
+                                    fill: "color-mix(in srgb,var(--chub-accent) 68%,transparent)",
                                   },
                                   h(
                                     "title",
@@ -2080,10 +2250,14 @@ window.__ModuleLoader__.load({
                                   "rect",
                                   {
                                     x,
-                                    y: 118 - ((day.totalTokens || 0) / maxTokens) * 108,
+                                    y:
+                                      118 -
+                                      ((day.totalTokens || 0) / maxTokens) *
+                                        108,
                                     width,
                                     height:
-                                      ((day.totalTokens || 0) / maxTokens) * 108,
+                                      ((day.totalTokens || 0) / maxTokens) *
+                                      108,
                                     fill: "transparent",
                                   },
                                   h(
@@ -2172,8 +2346,7 @@ window.__ModuleLoader__.load({
                                 series.length + " 天",
                               ),
                               ...dailyProviders.map((provider) => {
-                                const value =
-                                  providerTotals.get(provider) ?? 0;
+                                const value = providerTotals.get(provider) ?? 0;
                                 return h(
                                   "span",
                                   {
@@ -2185,7 +2358,8 @@ window.__ModuleLoader__.load({
                                       fmt(value) +
                                       " Token" +
                                       (dailyTotalTokens > 0
-                                        ? " · 占 " + pct(value / dailyTotalTokens)
+                                        ? " · 占 " +
+                                          pct(value / dailyTotalTokens)
                                         : ""),
                                   },
                                   h("i", {
@@ -2441,9 +2615,8 @@ window.__ModuleLoader__.load({
          * 而真正解决宽度问题的是这里。侧边栏图标是它唯一的发现路径。
          */
         ctx.slots.inject("main", () =>
-          ctx.slots.register(
-            { name: "main", key: PANEL_ID },
-            (props: any) => h(Page, { ...props, ctx }),
+          ctx.slots.register({ name: "main", key: PANEL_ID }, (props: any) =>
+            h(Page, { ...props, ctx }),
           ),
         );
       },

@@ -41,6 +41,7 @@ import {
 } from "../../vendor/ofm/src/gemini.ts";
 import { discoverGemini } from "./gemini-catalog.ts";
 import { syncQoderAccountName } from "./qoder-identity.ts";
+import { AccountSelection } from "../core/account-selection.ts";
 import { configureHubCache } from "../../vendor/ofm/src/models.ts";
 import { buildCosyHeaders } from "../../vendor/connect/cosy.js";
 import {
@@ -167,6 +168,7 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
   const pool = new AccountPool(ctx),
     drivers = new Map(),
     pending = new Map();
+  const selection = new AccountSelection(store, (id) => pool.findAccount(id));
   const read = async (a) => {
     const v = await ctx.credentials.resolve(a.credentialRef);
     return v ? parse(v.value) : undefined;
@@ -210,13 +212,25 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
       };
       const choose = async (provider, model = "", excluded = new Set()) => {
         if (provider !== id) throw Error("账号池不能跨渠道选择");
+        const requested = observer.context.getStore()?.requestedAccountId;
+        if (requested) {
+          selection.requireAccount(id, requested);
+          if (excluded.has(requested)) return null;
+        }
         const skipped = new Set(excluded);
         for (const a of pool.listAccountsByProvider(id)) {
-          const snapshot = await catalog.load(id + ":" + a.id);
-          if (model && !snapshot.models.some((m) => m.id === model))
+          if (requested && a.id !== requested) {
             skipped.add(a.id);
+            continue;
+          }
+          const snapshot = await catalog.load(id + ":" + a.id);
+          if (model && !snapshot.models.some((m) => m.id === model)) {
+            if (requested) throw Error("指定账号的动态目录不支持该模型，请更新模型或重新选择账号");
+            skipped.add(a.id);
+          }
         }
         const selected = await pool.getAvailableAccount(id, model, skipped);
+        if (!selected && requested) throw Error("指定账号当前不可用：该模型处于限流冷却或凭据不可用，请在渠道中心处理");
         if (selected)
           observer.bindAccount(selected.entry.id, selected.entry.nickname);
         return selected;
@@ -224,6 +238,21 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
       const runtimePool = new Proxy(pool, {
         get(target, key) {
           if (key === "getAvailableAccount") return choose;
+          if (key === "listAccountsByProvider")
+            return (provider) => {
+              const requested = observer.context.getStore()?.requestedAccountId;
+              return pool.listAccountsByProvider(provider).filter((a) => !requested || a.id === requested);
+            };
+          if (key === "findAccountIdByCredential")
+            return async (provider, identity) => {
+              const bound = observer.context.getStore()?.accountId;
+              const account = bound ? pool.findAccount(bound) : undefined;
+              if (account?.provider === provider) {
+                const credential = await read(account);
+                if (credential?.[provider === "codearts" ? "access_key_id" : "access_token"] === identity) return account.id;
+              }
+              return pool.findAccountIdByCredential(provider, identity);
+            };
           const value = target[key];
           return typeof value === "function" ? value.bind(target) : value;
         },
@@ -379,9 +408,11 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
           });
         });
       const hydrate = async () => {
+        const requested = await selection.get(id);
         const snapshots = await Promise.all(
           pool
             .listAccountsByProvider(id)
+            .filter((a) => a.enabled && (!requested || a.id === requested))
             .map((a) => catalog.load(id + ":" + a.id)),
         );
         product.fallbackModels = [
@@ -398,10 +429,7 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
             catalog.refresh(id + ":" + a.id, () => discover(a)),
           ),
         );
-        const union = new Map();
-        for (const s of results) for (const m of s.models) union.set(m.id, m);
-        product.fallbackModels = [...union.values()];
-        adapter = new Adapter(options);
+        await hydrate();
         try {
           ctx.emit("llm/adapters-updated");
         } catch (e) {
@@ -410,16 +438,16 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
         return results;
       };
       const visible = async () => {
-        if (!pool.listAccountsByProvider(id).some((a) => a.enabled)) return [];
-        const allowed = new Set();
-        for (const a of pool
-          .listAccountsByProvider(id)
-          .filter((a) => a.enabled))
+        const requested = await selection.get(id);
+        const available = pool.listAccountsByProvider(id).filter((a) => a.enabled && (!requested || a.id === requested));
+        if (available.length === 0) return [];
+        const models = new Map();
+        for (const a of available)
           for (const m of (await catalog.load(id + ":" + a.id)).models)
-            allowed.add(m.id);
+            models.set(m.id, m);
         const hidden = pool.disabledModelsFor(id);
-        return product.fallbackModels
-          .filter((m) => allowed.has(m.id) && !hidden.has(m.id))
+        return [...models.values()]
+          .filter((m) => !hidden.has(m.id))
           .map((m) => {
             const rate = rateLabel(m);
             return {
@@ -432,6 +460,13 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
               name: rate === undefined ? m.name : m.name + " · " + rate,
             };
           });
+      };
+      const streamWithSelection = async function* (opts, model, run, signal) {
+        const requestedAccountId = await selection.get(id);
+        yield* observer.stream(id, model, run, signal, {
+          ...streamMeta(opts),
+          ...(requestedAccountId ? { requestedAccountId } : {}),
+        });
       };
       const exposed = new Proxy(adapter, {
         get(_t, k) {
@@ -452,24 +487,22 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
                 ...prepared,
                 model: { ...prepared.model, provider: "channel-hub/" + id },
                 stream: (opts) =>
-                  observer.stream(
-                    id,
+                  streamWithSelection(
+                    opts,
                     m,
                     (signal) =>
                       prepared.stream({ ...opts, provider: id, signal }),
                     opts.signal ?? signal,
-                    streamMeta(opts),
                   ),
               };
             };
           if (k === "stream")
             return (opts) =>
-              observer.stream(
-                id,
+              streamWithSelection(
+                opts,
                 opts.model,
                 (signal) => adapter.stream({ ...opts, provider: id, signal }),
                 opts.signal,
-                streamMeta(opts),
               );
           const value = adapter[k];
           return typeof value === "function" ? value.bind(adapter) : value;
@@ -655,6 +688,7 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
     };
   }
   return {
+    selection,
     pool,
     drivers,
     login,

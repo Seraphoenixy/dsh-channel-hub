@@ -218,7 +218,15 @@
 .chub-sectionhead>div:first-child{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 320px}
 .chub-sectionhint{margin:0;font-size:13px;line-height:1.6;color:var(--chub-text-3)}
 .chub-sectools{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.chub-channels{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px;align-items:start}
+/**
+ * 渠道卡片网格。
+ *
+ * ⚠️ `align-items:stretch`（原来是 `start`）是有意的：卡片高度由**账号数**
+ * 决定，而网格按行对齐，`start` 会让「1 个账号的卡」旁边那张「2 个账号的卡」
+ * 下面留出一整块死白（1440px 实测 634px，其中 502px 仅来自双账号卡与单账号
+ * 卡同排）。改成 stretch 后行内卡片等高，残差交给卡内的可伸缩子项吸收。
+ */
+.chub-channels{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px;align-items:stretch}
 .chub-channel{
   --chan-accent:var(--chub-accent);
   position:relative;
@@ -226,12 +234,40 @@
   flex-direction:column;
   gap:10px;
   min-width:0;
+  /* 配合网格的 stretch：卡片吃满行高，内部才有可分配的剩余空间。 */
+  height:100%;
   padding:15px 16px 13px;
   overflow:hidden;
   border:1px solid var(--chub-line-soft);
   border-radius:15px;
   background:linear-gradient(160deg,var(--chub-layer-2),var(--chub-layer-1));
   transition:border-color .18s ease,transform .18s ease,box-shadow .18s ease;
+}
+/**
+ * 多账号渠道的卡片**跨两列**。
+ *
+ * 这是「高度差」的根治办法：账号从「纵向叠几块」变成「横向排几列」，多一个
+ * 账号只多一列、不再多一整块，高度差被宽度吸收。跨列后每卡约 640px，两个
+ * 账号各约 300px，四个操作按钮仍排得下。
+ *
+ * ⚠️ 判定用组件给出的 `data-multi`（见 client.ts），**不要**换成
+ * `:has(.chub-acct + .chub-acct)`：后者把布局分支绑在标记结构上，账号列表里
+ * 只要插入任何兄弟元素（错误提示、分组标题、滚动容器），`+` 就失效，卡片会
+ * **静默**退回单列 —— 不报错、不警告，只是布局变了。
+ */
+.chub-channel[data-multi]{grid-column:span 2}
+/**
+ * 跨列卡里的账号块并排。
+ *
+ * `auto-fit` 让列数随可用宽度自动决定：640px 的卡里 2 个账号并排、3 个账号
+ * 排成 3 列，不会退化成「2 + 1」两行；`grid-auto-rows:1fr` 保证同一行的账号框
+ * 等高，操作按钮底边对齐。
+ */
+.chub-channel[data-multi]>.chub-acctlist{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(210px,1fr));
+  grid-auto-rows:1fr;
+  gap:7px;
 }
 .chub-channel::before{content:"";position:absolute;inset:0 0 auto;height:2px;background:linear-gradient(90deg,var(--chan-accent),transparent 76%);opacity:.72}
 .chub-channel[data-state=idle]::before{background:linear-gradient(90deg,var(--chub-warn),transparent 76%)}
@@ -282,7 +318,14 @@
 .chub-smsform{display:flex;flex-direction:column;gap:7px;padding:10px 11px;border:1px solid var(--chub-line-soft);border-radius:12px;background:var(--chub-layer-1)}
 .chub-smsform .chub-smsfields{display:flex;gap:8px;flex-wrap:wrap}
 .chub-smsform .chub-field{flex:1 1 132px}
-.chub-acctlist{display:flex;flex-direction:column;gap:7px}
+/**
+ * 账号列表。
+ *
+ * `flex:1 1 auto` + `min-height:0` 让账号列表吃掉卡片的剩余高度：行内等高
+ * 拉出来的那几像素落在账号框里，再由 `.chub-acctacts{margin-top:auto}` 把
+ * 操作行推到账号框底边 —— 空白因此沉进账号框内部，而不是卡底一块白。
+ */
+.chub-acctlist{display:flex;flex-direction:column;gap:7px;flex:1 1 auto;min-height:0}
 .chub-acct{
   display:flex;
   flex-direction:column;
@@ -331,7 +374,14 @@
 .chub-pkgname{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--chub-text-2);font-weight:600}
 .chub-pkgval{flex:none;font-variant-numeric:tabular-nums;color:var(--chub-text-2)}
 .chub-pkgwhen{flex:none;font-variant-numeric:tabular-nums;color:var(--chub-text-3);white-space:nowrap}
-.chub-acctacts{display:flex;align-items:center;gap:3px;flex-wrap:wrap}
+/**
+ * 账号操作行。
+ *
+ * `margin-top:auto` 把按钮推到账号框底边：账号框被拉高时，多出来的高度落在
+ * 「模型折叠 ↔ 操作行」之间（账号框内部），而不是堆到卡片底部形成一块白。
+ * 同一行的账号框因为 `grid-auto-rows:1fr` 等高，操作行也就底边对齐。
+ */
+.chub-acctacts{display:flex;align-items:center;gap:3px;flex-wrap:wrap;margin-top:auto}
 .chub-inline{margin:0;font-size:12.5px;line-height:1.6;color:var(--chub-text-2);overflow-wrap:anywhere}
 .chub-inline.err{color:var(--chub-err)}
 .chub-inline.muted{color:var(--chub-text-3)}
@@ -490,6 +540,14 @@
   .chub-scroll th.lowpri,.chub-scroll td.lowpri{display:none}
 }
 .chub-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:22px 16px;border:1px dashed var(--chub-line);border-radius:11px;background:color-mix(in srgb,var(--chub-layer-1) 62%,transparent);text-align:center}
+/**
+ * 渠道卡里的空状态（「尚未添加账号」）吃掉卡片剩余高度。
+ *
+ * ⚠️ 卡片行内等高之后，0 账号的卡会被拉到与邻卡同高；若空状态不伸展，
+ * 多出来的高度就变成虚线框下面的一大片白 —— 比原来的洞更难看。让它 `flex:1`
+ * 并保持居中，卡片才是一张完整的卡。
+ */
+.chub-channel>.chub-empty{flex:1 1 auto;justify-content:center}
 .chub-empty b{font-size:13.5px;font-weight:640}
 .chub-empty p{margin:0;font-size:12.5px;line-height:1.55;color:var(--chub-text-3)}
 .chub-pager{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--chub-text-3)}
@@ -550,9 +608,19 @@
  * 双栏和 3 列 KPI 就在 564px 里硬挤。容器查询让「宽了就分栏、窄了就单列」
  * 跟着**真实可用宽度**走，两个入口（整窗 / 设置）自动各得其所，不需要两套规则。
  */
+.chub-account-choice{display:flex;align-items:center;gap:7px;min-width:0;max-width:100%;flex-wrap:wrap}
+.chub-account-choice select{min-width:100px;max-width:min(220px,100%);width:auto;font:inherit;padding:4px 8px;border:1px solid var(--chub-line);border-radius:7px;background:var(--chub-layer-1);color:inherit}
 .chub{container-type:inline-size;container-name:chub}
 @container chub (max-width:820px){
   .chub-channels{grid-template-columns:1fr}
+  /**
+   * ⚠️ 单列时**必须**收回跨列。
+   *
+   * `grid-column:span 2` 在只有 1 列的网格里会凭空造出**隐式第二列**，于是
+   * 卡片只占半宽、右边留一条与卡片等高的白 —— 比原来的洞更糟。实测 780px
+   * 会稳定复现。这条规则不能省。
+   */
+  .chub-channel[data-multi]{grid-column:auto}
   .chub-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
   .chub-hero{padding:18px 18px 16px}
 }

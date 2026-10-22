@@ -1345,15 +1345,15 @@ export class BuddyAdapter extends LlmAdapter {
       }
     }
     const messages = serializeMessages(options.messages, imageUrls)
+    if (options.system !== undefined && options.system.length > 0) {
+      messages.unshift({ role: 'system', content: options.system })
+    }
     // Local adaptation: the independent hub has no legacy gateway, so apply the
-    // upstream IKJNA1 compatibility rule at the shared wire boundary instead.
+    // upstream IKJNA1 compatibility rule after merging both system inputs.
     for (const message of messages) {
       if (message.role === 'system' && typeof message.content === 'string') {
         message.content = rewriteTencentContentFingerprints(message.content, this.product.id)
       }
-    }
-    if (options.system !== undefined && options.system.length > 0) {
-      messages.unshift({ role: 'system', content: options.system })
     }
     if (this.product.id === 'workbuddy' && (messages.length === 0 || messages[0].role !== 'system')) {
       messages.unshift({ role: 'system', content: 'You are a helpful assistant.' })

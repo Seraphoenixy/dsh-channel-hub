@@ -9,6 +9,7 @@ import {
 } from "./types.ts";
 import type { Store } from "../storage/client.ts";
 interface Scope {
+  requestedAccountId?: string;
   request: RequestRow;
   attempts: Attempt[];
   accountId: string;
@@ -25,6 +26,8 @@ interface Scope {
 }
 /** 调用方补充的上下文（DSH 只给 sessionId，轮次由本插件推断）。 */
 export interface StreamMeta {
+  /** Explicit channel choice captured at dispatch, never shared between requests. */
+  requestedAccountId?: string;
   sessionId?: string;
   startsTurn?: boolean;
 }
@@ -36,10 +39,15 @@ export interface StreamMeta {
  * 更看不出"这条不是模型故障"（真实缺陷，2026-10-21 用户报障）。
  * 保留括注是为了排查时仍能与宿主日志逐字对上。
  */
-function cancelMessage(source: "caller" | "plugin" | undefined, error: unknown): string {
+function cancelMessage(
+  source: "caller" | "plugin" | undefined,
+  error: unknown,
+): string {
   const original = redact(error);
   if (source === "caller")
-    return original.length > 0 ? "请求已取消（用户停止）：" + original : "请求已取消（用户停止）";
+    return original.length > 0
+      ? "请求已取消（用户停止）：" + original
+      : "请求已取消（用户停止）";
   if (source === "plugin")
     return original.length > 0
       ? "插件已停止，本次请求中断：" + original
@@ -160,7 +168,12 @@ export class Observer {
     };
     req.turnId = this.turnFor(meta, req.id);
     if (meta?.startsTurn === true) req.startsTurn = true;
-    const scope: Scope = { request: req, attempts: [], accountId: "" };
+    const scope: Scope = {
+      request: req,
+      attempts: [],
+      accountId: "",
+      requestedAccountId: meta?.requestedAccountId,
+    };
     await this.write("begin", req);
     // ⚠️ 迭代器必须在 try 内创建：驱动完全可能同步抛错（参数校验、凭据缺失、
     // 适配器本身抛异常）。放在 try 外会让整个 finally 都不执行 —— 请求停在
@@ -425,9 +438,13 @@ export class Observer {
             // 只有"调用方主动取消"或"本插件的 controller 已 abort"才算取消；
             // 其余按正常结束处理（attempt 已是 success/failed 时保留原值）。
             const aborted =
-              init?.signal?.aborted === true || this.context.getStore()?.abortSource !== undefined;
+              init?.signal?.aborted === true ||
+              this.context.getStore()?.abortSource !== undefined;
             if (a.outcome === "running")
-              await finish(aborted ? "cancelled" : "success", aborted ? reason : undefined);
+              await finish(
+                aborted ? "cancelled" : "success",
+                aborted ? reason : undefined,
+              );
             await reader.cancel(reason).catch(() => {});
           },
         });
