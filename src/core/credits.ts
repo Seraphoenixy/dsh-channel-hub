@@ -11,7 +11,7 @@
  *
  * | 渠道 | 形状 |
  * |---|---|
- * | buddy / workbuddy / qoder / trae / lobsterai / loomy / raccoon | `CreditBalance` |
+ * | buddy / workbuddy / qoder / trae / loomy / raccoon | `CreditBalance` |
  * | gemini | `{ balance, error?, tier? }` |
  * | codearts | `CodeArtsAccountInfo`（积分账户才带 `credit`） |
  *
@@ -273,7 +273,7 @@ function summarize(
   };
 }
 
-/** vendor 的通用 `CreditBalance`（buddy / qoder / trae / lobsterai / loomy / raccoon）。 */
+/** vendor 的通用 `CreditBalance`（buddy / qoder / trae / loomy / raccoon）。 */
 function fromCreditBalance(value: unknown): CreditReading | undefined {
   const raw = recordOf(value);
   if (raw === undefined) return undefined;

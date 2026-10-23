@@ -1,4 +1,5 @@
 import type { Model } from "../core/types.ts";
+import { describeHttpFailure } from "../core/types.ts";
 // Endpoint/schema reference (not copied implementation):
 // https://github.com/darvell/codex-pool/blob/main/antigravity_models.go
 // https://github.com/suasgn/openburn/blob/main/docs/providers/antigravity.md
@@ -67,7 +68,17 @@ export async function discoverGemini(options: {
           signal: AbortSignal.timeout(15000),
         },
       );
-      if (!response.ok) throw Error("Gemini 目录 HTTP " + response.status);
+      if (!response.ok) {
+        // 与其它渠道同口径：Gemini 的 403 可能是「地区不支持」或「缺 project」，
+        // 只报状态码看不出区别（实测 403 带 UNSUPPORTED_LOCATION 文案）。
+        let detail = "";
+        try {
+          detail = await response.text();
+        } catch {
+          detail = "";
+        }
+        throw Error(describeHttpFailure("Gemini 目录", response.status, detail));
+      }
       return parseGeminiCatalog(await response.json(), options.supportedId);
     } catch (e) {
       failure = e;

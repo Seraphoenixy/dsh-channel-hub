@@ -466,7 +466,7 @@ test("partial usage frames preserve previously reported input tokens", async (t)
   assert.equal(db.stats().totals.totalTokens, 12);
 });
 
-test("rate labels cover Qoder, Buddy, Trae and LobsterAI without inventing values", () => {
+test("rate labels cover Qoder, Buddy and Trae without inventing values", () => {
   assert.equal(rateLabel({ priceFactor: 0 }), "0×");
   assert.equal(rateLabel({ priceFactor: 0.5 }), "0.5×");
   assert.equal(rateLabel({ creditsRate: "x0.29" }), "x0.29");
@@ -488,7 +488,6 @@ test("rate labels cover Qoder, Buddy, Trae and LobsterAI without inventing value
     rateLabel({ creditsRate: 0, originalCreditsRate: 0.1 }),
     "x0.1→免费",
   );
-  assert.equal(rateLabel({ costMultiplier: 0.05 }), "x0.05");
   assert.equal(rateLabel({}), undefined);
   assert.equal(rateLabel({ creditsRate: "" }), undefined);
   assert.equal(rateLabel({ priceFactor: Number.NaN }), undefined);

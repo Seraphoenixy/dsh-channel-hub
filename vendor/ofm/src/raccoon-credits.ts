@@ -32,7 +32,12 @@ import {
   type RaccoonCredential,
 } from './raccoon.js'
 import { RACCOON, type RaccoonProduct } from './raccoon-product.js'
-import type { ClaimOutcome, CreditBalance, CreditPackage } from './credits.js'
+import type {
+  ClaimOutcome,
+  CreditBalance,
+  CreditBalanceResult,
+  CreditPackage,
+} from './credits.js'
 
 /** 登录奖励的默认额度（服务端未在 popup 里给出时兜底）。 */
 export const RACCOON_LOGIN_REWARD_POINTS = 3000
@@ -138,6 +143,21 @@ export async function fetchRaccoonCreditBalance(
   credential: RaccoonCredential,
   fetcher: typeof fetch = fetch,
 ): Promise<CreditBalance | null> {
+  const result = await fetchRaccoonCreditBalanceDetailed(product, credential, fetcher)
+  return result.balance
+}
+
+/**
+ * {@link fetchRaccoonCreditBalance} 的**带原因**版本。
+ *
+ * `requestJson` 已经把业务码与 `message` 拆好了，旧实现直接丢掉，
+ * 面板只剩通用文案 —— 无法区分「令牌过期」与「服务端 5xx」。
+ */
+export async function fetchRaccoonCreditBalanceDetailed(
+  product: RaccoonProduct,
+  credential: RaccoonCredential,
+  fetcher: typeof fetch = fetch,
+): Promise<CreditBalanceResult> {
   const envelope = await requestJson(
     `${product.apiBase}${RACCOON_POINTS_PREFIX}/balance`,
     credential,
@@ -145,11 +165,19 @@ export async function fetchRaccoonCreditBalance(
     { method: 'GET' },
     fetcher,
   )
-  if (!envelope.ok || envelope.data === undefined) return null
+  if (!envelope.ok || envelope.data === undefined) {
+    return {
+      balance: null,
+      error: envelope.message.length > 0
+        ? `额度查询失败（code ${envelope.code}）：${envelope.message}`
+        : `额度查询失败（code ${envelope.code}）`,
+    }
+  }
 
   const available = readNumber(envelope.data.available_points)
   // `available_points` 是核心字段：没有它就说明响应形状不对，不编造数字。
-  if (available === undefined) return null
+  if (available === undefined)
+    return { balance: null, error: '额度响应里没有 available_points 字段' }
 
   const packages: CreditPackage[] = []
   const reward = readNumber(envelope.data.reward_points)
@@ -162,10 +190,12 @@ export async function fetchRaccoonCreditBalance(
   if (topup !== undefined) packages.push(makePackage('充值积分', topup))
 
   return {
-    total: available,
-    // 极端情形（服务端只给 total 不给分项）也要有至少一个包，否则 UI 空列表
-    packages: packages.length > 0 ? packages : [makePackage('可用积分', available)],
-    expiredTotal: 0,
+    balance: {
+      total: available,
+      // 极端情形（服务端只给 total 不给分项）也要有至少一个包，否则 UI 空列表
+      packages: packages.length > 0 ? packages : [makePackage('可用积分', available)],
+      expiredTotal: 0,
+    },
   }
 }
 

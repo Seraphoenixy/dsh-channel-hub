@@ -15,9 +15,6 @@ import { parseQoderRemoteModels } from "../../vendor/ofm/src/qoder-catalog.ts";
 import { QoderAuth } from "../../vendor/ofm/src/qoder-auth.ts";
 import { QoderAdapter } from "../../vendor/ofm/src/qoder-adapter.ts";
 import { QODER, QODER_CN } from "../../vendor/ofm/src/qoder-product.ts";
-import { LobsteraiAuth } from "../../vendor/ofm/src/lobsterai-auth.ts";
-import { LobsteraiAdapter } from "../../vendor/ofm/src/lobsterai-adapter.ts";
-import { LOBSTERAI } from "../../vendor/ofm/src/lobsterai-product.ts";
 import { TraeAuth } from "../../vendor/ofm/src/trae-auth.ts";
 import { TraeAdapter } from "../../vendor/ofm/src/trae-adapter.ts";
 import { TRAE } from "../../vendor/ofm/src/trae-product.ts";
@@ -45,29 +42,27 @@ import { AccountSelection } from "../core/account-selection.ts";
 import { configureHubCache } from "../../vendor/ofm/src/models.ts";
 import { buildCosyHeaders } from "../../vendor/connect/cosy.js";
 import {
-  fetchCreditBalance,
+  fetchCreditBalanceDetailed,
   claimDailyCheckin,
 } from "../../vendor/ofm/src/credits.ts";
 import {
-  fetchCodeArtsAccountInfo,
+  fetchCodeArtsAccountInfoDetailed,
   claimCodeArtsDailyCheckin,
 } from "../../vendor/ofm/src/codearts-credits.ts";
 import {
-  fetchQoderCreditBalance,
+  fetchQoderCreditBalanceDetailed,
   claimQoderDailyCheckin,
 } from "../../vendor/ofm/src/qoder-credits.ts";
 import {
-  fetchTraeCreditBalance,
+  fetchTraeCreditBalanceDetailed,
   claimTraeDailyCheckin,
 } from "../../vendor/ofm/src/trae-credits.ts";
-import {
-  fetchLobsteraiCreditBalance,
-  claimLobsteraiDailyCheckin,
-} from "../../vendor/ofm/src/lobsterai-credits.ts";
+import { fetchLoomyCreditBalanceDetailed } from "../../vendor/ofm/src/loomy-credits.ts";
+import { fetchRaccoonCreditBalanceDetailed } from "../../vendor/ofm/src/raccoon-credits.ts";
 import { fetchGeminiCreditBalance } from "../../vendor/ofm/src/gemini-credits.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { redact, credentialExpiry } from "../core/types.ts";
+import { redact, credentialExpiry, describeHttpFailure } from "../core/types.ts";
 const specs = [
   [
     "codearts",
@@ -82,7 +77,6 @@ const specs = [
   ["workbuddy", "WorkBuddy 国际版", BuddyAuth, BuddyAdapter, WORKBUDDY],
   ["qoder", "Qoder 国际版", QoderAuth, QoderAdapter, QODER],
   ["qodercn", "Qoder CN", QoderAuth, QoderAdapter, QODER_CN],
-  ["lobsterai", "LobsterAI", LobsteraiAuth, LobsteraiAdapter, LOBSTERAI],
   // 旧 SOLO 已并入 Trae CN IDE，只保留一个 Trae 渠道；登录仍走 OFM 的
   // TraeAuth/ExchangeToken，仅把客户端与版本身份换成现役 CN IDE。
   [
@@ -143,8 +137,18 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
     try {
       const response = await fetch(input, init);
       if (state) {
-        if (!response.ok) state.error = "目录 HTTP " + response.status;
-        else {
+        if (!response.ok) {
+          // ⚠️ 必须读响应体：403 同时覆盖「凭据失效 / 账号被禁用 / 额度耗尽 /
+          // 无权限」四种语义，只留状态码等于没有原因（真实缺陷，2026-10-23）。
+          // `clone()` 保证原响应仍可被下游正常消费。
+          let detail = "";
+          try {
+            detail = await response.clone().text();
+          } catch {
+            detail = "";
+          }
+          state.error = describeHttpFailure("目录", response.status, detail);
+        } else {
           try {
             const body = await response.clone().json();
             // 复用同一次目录请求：`/v3/config` 的 `data.modelPromotions` 带
@@ -352,7 +356,16 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
               }),
               signal: AbortSignal.timeout(30000),
             });
-            if (!response.ok) throw Error("目录 HTTP " + response.status);
+            if (!response.ok) {
+              // 与 `directoryFetch` 同口径：带上响应体里的业务码/原因。
+              let detail = "";
+              try {
+                detail = await response.text();
+              } catch {
+                detail = "";
+              }
+              throw Error(describeHttpFailure("目录", response.status, detail));
+            }
             const raw = await response.json();
             if (!Array.isArray(raw.chat)) throw Error("目录缺少 chat 数组");
             models = parseQoderRemoteModels(raw);
@@ -363,7 +376,15 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
               headers: { Accept: "application/json", token: c.access_token },
               signal: AbortSignal.timeout(30000),
             });
-            if (!res.ok) throw Error("目录 HTTP " + res.status);
+            if (!res.ok) {
+              let detail = "";
+              try {
+                detail = await res.text();
+              } catch {
+                detail = "";
+              }
+              throw Error(describeHttpFailure("目录", res.status, detail));
+            }
             models = parseLoomyRemoteModels(await res.json());
           } else if (id === "gemini")
             models = await discoverGemini({
@@ -512,15 +533,37 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
         ["channel-hub/" + id],
         exposed,
       );
+      /**
+       * 额度查询。
+       *
+       * 一律优先调用**带原因的** `…Detailed` 变体，把上游的 `code` / `msg`
+       * 一并交给余额服务落库。旧实现只调 `null` 版本，于是 LobsterAI 账号被
+       * 禁用（`403 {"code":40302,"message":"账号已被禁用"}`）时，界面只能显示
+       * 「凭据失效或响应异常」—— 把用户引向「重新登录」这个无效动作。
+       *
+       * 各渠道的返回形状统一为 `{ balance, error? }`；`balance !== null` 即成功。
+       */
       const balance = async (a) => {
         const c = await read(a);
         if (!c) throw Error("凭据不可读取");
-        if (id === "codearts") return fetchCodeArtsAccountInfo(c);
+        if (id === "codearts") {
+          // codearts 早已备好带原因的版本，只是此前没人调用。
+          const result = await fetchCodeArtsAccountInfoDetailed(c);
+          if (!result.ok) return { balance: null, error: result.message };
+          // 成功时**原样**返回 `CodeArtsAccountInfo`：它自己带 `isCreditPackage`，
+          // 由 `core/credits.ts` 的 `fromCodeArts` 区分「积分账户」与「非积分账户」
+          // ——后者是正常的账户类型差异，要显示 note 而不是错误。
+          return result.info;
+        }
         if (id === "buddy" || id === "workbuddy")
-          return fetchCreditBalance(c, product);
-        if (id.startsWith("qoder")) return fetchQoderCreditBalance(c, product);
-        if (id.startsWith("trae")) return fetchTraeCreditBalance(c, product);
-        if (id === "lobsterai") return fetchLobsteraiCreditBalance(c, product);
+          return fetchCreditBalanceDetailed(c, product);
+        if (id.startsWith("qoder"))
+          return fetchQoderCreditBalanceDetailed(c, product);
+        if (id.startsWith("trae"))
+          return fetchTraeCreditBalanceDetailed(c, product);
+        if (id === "loomy") return fetchLoomyCreditBalanceDetailed(c, product);
+        if (id === "raccoon")
+          return fetchRaccoonCreditBalanceDetailed(product, c);
         if (id === "gemini") return fetchGeminiCreditBalance(c, product);
         if (auth.fetchCreditBalance) return auth.fetchCreditBalance(c);
         if (auth.fetchBalanceFor) return auth.fetchBalanceFor(c);
@@ -532,7 +575,6 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
         "qoder",
         "qodercn",
         "trae",
-        "lobsterai",
         "loomy",
         "raccoon",
       ].includes(id)
@@ -550,12 +592,6 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
                 fetch,
                 pool.traeCheckinDeviceGenerationFor(a.id),
                 (g) => pool.updateTraeCheckinDeviceGeneration(a.id, g),
-              );
-            if (id === "lobsterai")
-              return claimLobsteraiDailyCheckin(
-                c,
-                product,
-                await auth.resolveClientVersion(),
               );
             if (auth.claimDailyFor) return auth.claimDailyFor(c);
             if (auth.claimDailyQuota) return auth.claimDailyQuota(c);

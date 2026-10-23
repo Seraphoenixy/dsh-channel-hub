@@ -109,8 +109,6 @@
         return "x" + original + "\u2192" + current;
       return current;
     }
-    const cost = numberText(model.costMultiplier);
-    if (cost !== void 0) return "x" + cost;
     const effective = numberText(model.effectiveMultiplier);
     if (effective !== void 0) {
       const base = numberText(model.baseMultiplier);
@@ -207,7 +205,6 @@
         workbuddy: "#2fa58a",
         qoder: "#6b6ef5",
         qodercn: "#4c8fd9",
-        lobsterai: "#d97757",
         trae: "#2fa58a",
         loomy: "#d35d8a",
         raccoon: "#b47a2e",

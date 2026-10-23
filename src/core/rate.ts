@@ -8,8 +8,7 @@
  * - CodeBuddy / WorkBuddy：`creditsRate`（字符串 `x0.29`），促销价在
  *   `discountedCreditsRate`（如 `x0.50` 或 `免费`），活动时段在 `promotion`；
  * - Trae：`creditsRate` / `originalCreditsRate`（数字，来自消耗倍率注册表），
- *   限时活动终点在 `discountEndsAtSec`；
- * - LobsterAI：`costMultiplier`（数字）。
+ *   限时活动终点在 `discountEndsAtSec`。
  *
  * 这里只做展示归一化，**不编造**：字段缺失或不是有限数时返回 `undefined`，
  * 由调用方决定不渲染，而不是补一个 `x1`。`0` 必须原样显示（免费也是倍率）。
@@ -185,8 +184,7 @@ function promoRateText(rate: string | undefined): string | undefined {
  *
  * - Qoder：`priceFactor` → `0.5×` / `0×`；
  * - CodeBuddy：`creditsRate`，有折扣时 `原价→折后价`；
- * - Trae：数字倍率，折扣时 `x原→x折`，`0` 显示「免费」；
- * - LobsterAI：`x0.05`。
+ * - Trae：数字倍率，折扣时 `x原→x折`，`0` 显示「免费」。
  */
 export function rateLabel(
   model: Record<string, unknown> | undefined,
@@ -224,10 +222,6 @@ export function rateLabel(
       return "x" + original + "→" + current;
     return current;
   }
-
-  // LobsterAI：裸数字倍率。
-  const cost = numberText(model.costMultiplier);
-  if (cost !== undefined) return "x" + cost;
 
   // Raccoon 一类驱动可能直接给出生效价/原价字段。
   const effective = numberText(model.effectiveMultiplier);

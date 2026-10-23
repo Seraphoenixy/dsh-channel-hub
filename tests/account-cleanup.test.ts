@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import {
   accountSnapshotKeys,
   orphanAccounts,
+  purgeAccountCredential,
   purgeAccountSnapshots,
 } from "../src/core/account-cleanup.ts";
 import type { Store } from "../src/storage/client.ts";
@@ -113,6 +114,79 @@ test("单个键删除失败只记 warn，其余照删且不拖垮删号", async 
   assert.deepEqual([...store.rows.keys()], ["balance:acc-1"]);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /账号快照清理失败/);
+});
+
+/**
+ * 凭据注销（`purgeAccountCredential`）。
+ *
+ * 这一组钉死的是宿主 API 的**真实方法面**：`ctx.credentials` 只有
+ * `resolve` / `describe` / `set` / `unset`。旧实现写 `credentials.delete?.()`，
+ * 在真实宿主上抛 `TypeError`，又因为调用点在 `removeAccount()` 之后，
+ * 表现为「弹报错但账号确实被删掉了」，并顺手跳过了快照与凭据清理。
+ */
+test("按宿主真实 API 用 unset 注销凭据", async () => {
+  const refs: string[] = [];
+  const credentials = {
+    async unset(ref: string) {
+      refs.push(ref);
+    },
+  };
+  assert.equal(await purgeAccountCredential(credentials, "ACCOUNT_x"), true);
+  assert.deepEqual(refs, ["ACCOUNT_x"]);
+});
+
+test("宿主没有 delete 时不得抛错（这正是旧实现的失败方式）", async () => {
+  const warnings: string[] = [];
+  // 只有 unset：完整镜像真实服务，没有任何 delete / remove。
+  const credentials = { async unset() {} };
+  assert.equal(
+    await purgeAccountCredential(credentials, "ACCOUNT_x", {
+      warn: (m: string) => warnings.push(m),
+    }),
+    true,
+  );
+  assert.deepEqual(warnings, [], "正常的 unset 不该产生告警");
+
+  // 服务上根本没有注销方法（宿主未提供凭据能力）：静默跳过，不抛错。
+  assert.equal(await purgeAccountCredential({}, "ACCOUNT_x"), false);
+  assert.equal(await purgeAccountCredential(undefined, "ACCOUNT_x"), false);
+});
+
+test("旧宿主的 delete 与 remove 仍被接受", async () => {
+  const removed: string[] = [];
+  assert.equal(
+    await purgeAccountCredential(
+      { async delete(ref: string) { removed.push(ref); } },
+      "ACCOUNT_a",
+    ),
+    true,
+  );
+  assert.equal(
+    await purgeAccountCredential(
+      { async remove(ref: string) { removed.push(ref); } },
+      "ACCOUNT_b",
+    ),
+    true,
+  );
+  assert.deepEqual(removed, ["ACCOUNT_a", "ACCOUNT_b"]);
+});
+
+test("注销失败只记 warn，绝不把删号变成失败", async () => {
+  const warnings: string[] = [];
+  const credentials = {
+    async unset() {
+      throw Error("credentials file is locked");
+    },
+  };
+  assert.equal(
+    await purgeAccountCredential(credentials, "ACCOUNT_x", {
+      warn: (m: string) => warnings.push(m),
+    }),
+    false,
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /账号凭据清理失败/);
+  assert.match(warnings[0], /locked/);
 });
 
 test("渠道未注册的账号被识别出来，且不误伤已注册渠道", () => {

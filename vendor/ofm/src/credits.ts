@@ -274,6 +274,91 @@ export interface CreditBalance {
 }
 
 /**
+ * 余额查询结果：成功时是余额，失败时**带上游给的原因**。
+ *
+ * ## 为什么失败要带原因（真实缺陷，2026-10-23）
+ *
+ * 早先本文件与其余六个 provider 的 `fetch*CreditBalance` 一律用 `null` 表达
+ * 失败，调用方（Channel Pack 面板）只能把它统一显示成一句
+ * 「额度查询失败（凭据失效或响应异常）」。实测踩到：LobsterAI 账号被服务端
+ * **禁用**（`HTTP 403 {"code":40302,"message":"账号已被禁用"}`），界面却显示
+ * 「凭据失效」——把用户引向「重新登录」这个**完全无效**的动作（账号被禁用时
+ * 重新登录仍然 40302）。
+ *
+ * 只显示「失败」而不显示「为什么失败」，还会让排查必须去翻数据库、按时间线
+ * 反推是哪一端出的问题。上游的 `code` / `msg` 明明就在响应体里，没有理由
+ * 在解析层丢掉。
+ *
+ * 因此统一成 `{ balance, error }`：`balance: null` 表示查不到，
+ * `error` 是**可读原因**（优先上游 `msg`，其次状态码 + 响应片段，
+ * 最后是本地结构性说明）。成功时 `error` 缺失。
+ *
+ * ⚠️ **`balance: null` 不等于余额为 0**（与 `null` 时代的约定一致）：
+ * 耗尽会返回 `total: 0` 的正常余额对象，不是失败。
+ *
+ * ⚠️ 保持向后兼容：既有 `fetch*` 函数签名不变、仍返回 `null`，
+ * 需要原因的调用方改用对应的 `…Detailed` 变体。这与
+ * `fetchCodeArtsAccountInfo` / `fetchCodeArtsAccountInfoDetailed` 的既有先例同型。
+ */
+export type CreditBalanceResult =
+  | { balance: CreditBalance; error?: undefined }
+  | { balance: null; error: string }
+
+/** 失败原因里保留的响应片段长度（足够读出 `code` / `msg`，又不至于刷屏）。 */
+const FAILURE_SNIPPET_LIMIT = 200
+
+/**
+ * 把一次失败整理成可读原因。
+ *
+ * 取值顺序：上游 `msg` / `message` → HTTP 状态码 + 响应片段 → 兜底说明。
+ * **401/403 会被单独点名**，因为这两种状态最常见的成因是凭据，而
+ * 上游若给了明确的 `msg`（如「账号已被禁用」），那个 msg 更准确、优先采用。
+ *
+ * @param status - HTTP 状态码（未知时传 0）
+ * @param body - 响应体原文（非 JSON 也照收，只截片段）
+ * @param fallback - 上面两条都拿不到时的说明
+ */
+export function describeCreditFailure(
+  status: number,
+  body: string,
+  fallback = '额度查询失败（上游未返回原因）',
+): string {
+  const text = body.trim()
+  let detail = ''
+  if (text.length > 0) {
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>
+      if (typeof parsed === 'object' && parsed !== null) {
+        const code = parsed.code ?? parsed.error_code
+        // 各家后端把「可读原因」放在不同字段里，实测出现过全部五个：
+        // buddy/腾讯 `msg`、lobsterai `message`、华为 APIG `error_msg`、
+        // 部分网关 `error`、OAuth 风格 `error_description`。少认一个就会
+        // 把一条已经说清楚的原因降级成「上游未返回原因」。
+        const msg =
+          parsed.msg ??
+          parsed.message ??
+          parsed.error_msg ??
+          parsed.error ??
+          parsed.error_description ??
+          parsed.detail
+        const parts: string[] = []
+        if (code !== undefined && code !== null && String(code).length > 0) parts.push(`code ${String(code)}`)
+        if (typeof msg === 'string' && msg.trim().length > 0) parts.push(msg.trim())
+        detail = parts.join('：')
+      }
+    } catch {
+      // 非 JSON：截一段原文，比只说状态码有用得多。
+      detail = text.slice(0, FAILURE_SNIPPET_LIMIT).replace(/\s+/g, ' ')
+    }
+  }
+  if (detail.length === 0) {
+    if (status === 401 || status === 403) return `凭据或账号被拒（HTTP ${status}），上游未返回原因`
+    return status > 0 ? `额度查询失败（HTTP ${status}）` : fallback
+  }
+  return status > 0 ? `额度查询失败（HTTP ${status}）：${detail}` : `额度查询失败：${detail}`
+}
+
+/**
  * 构造签到/余额请求头。不含 X-Device-Token（实测非必需）。
  *
  * `X-Domain` **以产品配置为准**，而不是优先用凭据里的 `credential.domain`：
@@ -333,8 +418,8 @@ function readStringArray(source: Record<string, unknown>, key: string): string[]
  * （如 "socket hang up"），便于上层如实呈现失败原因，也便于排查。
  */
 type PostResult =
-  | { ok: true; body: Record<string, unknown> }
-  | { ok: false; message: string }
+  | { ok: true; body: Record<string, unknown>; status?: number; text?: string }
+  | { ok: false; message: string; status?: number; text?: string }
 
 /** 响应体可解析为对象、但缺少必要字段时的统一失败说明。 */
 const UNPARSABLE_RESPONSE_MESSAGE = '请求失败或响应无法解析'
@@ -369,12 +454,17 @@ async function postJson(
     } catch {
       // 非 JSON：多半是网关 HTML 错误页（凭据失效的典型表现）。
       // 如实带上状态码，让「HTTP 401/403 → 凭据问题」这条线索浮出来。
-      return { ok: false, message: describeNonJsonResponse(response.status, text) }
+      return {
+        ok: false,
+        message: describeNonJsonResponse(response.status, text),
+        status: response.status,
+        text,
+      }
     }
     if (typeof parsed !== 'object' || parsed === null) {
-      return { ok: false, message: UNPARSABLE_RESPONSE_MESSAGE }
+      return { ok: false, message: UNPARSABLE_RESPONSE_MESSAGE, status: response.status, text }
     }
-    return { ok: true, body: parsed as Record<string, unknown> }
+    return { ok: true, body: parsed as Record<string, unknown>, status: response.status, text }
   } catch (error) {
     // 保留原始错误消息（含超时/连接被重置等信号），不吞掉诊断信息。
     return { ok: false, message: error instanceof Error ? error.message : String(error) }
@@ -553,19 +643,44 @@ export async function fetchCreditBalance(
   product: BuddyProduct,
   fetcher: typeof fetch = fetch,
 ): Promise<CreditBalance | null> {
+  const result = await fetchCreditBalanceDetailed(credential, product, fetcher)
+  return result.balance
+}
+
+/**
+ * {@link fetchCreditBalance} 的**带原因**版本。
+ *
+ * 失败时 `error` 保留上游的 `code` / `msg`（例如 `code 40302：账号已被禁用`），
+ * 而不是让界面只能显示「凭据失效或响应异常」那种猜错的通用文案。
+ * 语义与 {@link CreditBalanceResult} 一致：`balance: null` ≠ 余额为 0。
+ */
+export async function fetchCreditBalanceDetailed(
+  credential: BuddyCredential,
+  product: BuddyProduct,
+  fetcher: typeof fetch = fetch,
+): Promise<CreditBalanceResult> {
   const result = await postJson(USER_RESOURCE_PATH, credential, product, fetcher)
-  if (!result.ok) return null
+  if (!result.ok) {
+    return { balance: null, error: failureOf(result) }
+  }
   const body = result.body
-  if (body.code !== 0) return null
+  if (body.code !== 0) {
+    // 业务码非 0：优先用服务端 msg（腾讯侧常见 `code:10001` + 中文说明）。
+    return { balance: null, error: describeCreditFailure(200, result.text ?? JSON.stringify(body)) }
+  }
   // data.Response.Data —— 两层嵌套，逐层校验，任一层缺失即视为不可解析
   const outer = body.data
-  if (typeof outer !== 'object' || outer === null) return null
+  if (typeof outer !== 'object' || outer === null)
+    return { balance: null, error: '响应缺少 data' }
   const response = (outer as Record<string, unknown>).Response
-  if (typeof response !== 'object' || response === null) return null
+  if (typeof response !== 'object' || response === null)
+    return { balance: null, error: '响应缺少 data.Response' }
   const inner = (response as Record<string, unknown>).Data
-  if (typeof inner !== 'object' || inner === null) return null
+  if (typeof inner !== 'object' || inner === null)
+    return { balance: null, error: '响应缺少 data.Response.Data' }
   const accounts = (inner as Record<string, unknown>).Accounts
-  if (!Array.isArray(accounts)) return null
+  if (!Array.isArray(accounts))
+    return { balance: null, error: '响应缺少 Accounts 列表' }
 
   const packages: CreditPackage[] = []
   for (const item of accounts) {
@@ -584,7 +699,20 @@ export async function fetchCreditBalance(
   const expiredTotal = roundCredits(
     packages.reduce((sum, pkg) => sum + (pkg.active ? 0 : pkg.remaining), 0),
   )
-  return { total, packages, expiredTotal }
+  return { balance: { total, packages, expiredTotal } }
+}
+
+/** 把 {@link PostResult} 的失败转成 {@link CreditBalanceResult} 的原因。 */
+function failureOf(result: { message: string; status?: number; text?: string }): string {
+  // 非 JSON 的 HTML 错误页：`message` 已由 `describeNonJsonResponse` 整理过，
+  // 直接采用（它带状态码）；JSON 失败则再尝试从响应体里挖上游 code/msg。
+  if (result.text !== undefined && result.text.trim().length > 0) {
+    const parsed = describeCreditFailure(result.status ?? 0, result.text, result.message)
+    return parsed
+  }
+  return result.status !== undefined && result.status > 0
+    ? `${result.message}（HTTP ${result.status}）`
+    : result.message
 }
 
 /**

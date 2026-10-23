@@ -177,3 +177,60 @@ test("a renewed short-lived token is not rotated on every scan or balance query"
     assert.equal(calls, 2, "manual renewal can still be requested immediately");
   } finally { await service.stop(); }
 });
+
+/**
+ * 失败原因透传（`{ balance, error }`）。
+ *
+ * 真实故障：LobsterAI 账号被上游禁用，返回
+ * `HTTP 403 {"code":40302,"message":"账号已被禁用"}`，旧实现把它压成
+ * 「额度查询失败（凭据失效或响应异常）」——用户会去重新登录，而那是无效动作。
+ */
+test("上游给的原因被原样落库，不被通用文案覆盖", async () => {
+  const upstream = "额度查询失败（HTTP 403）：code 40302：账号已被禁用";
+  const f = fixture(async () => ({ balance: null, error: upstream }));
+  f.accounts.splice(1);
+  await assert.rejects(f.service.refresh(f.accounts[0]), (e: Error) => {
+    assert.equal(e.message, upstream);
+    return true;
+  });
+  const saved = f.values.get("balance:one");
+  assert.equal(saved.error, upstream, "失败原因必须落库，界面读的是它");
+  assert.equal(typeof saved.errorAt, "number");
+  assert.equal(typeof saved.retryAt, "number");
+  await f.service.stop();
+});
+
+test("带原因的成功结果按余额存入，不把包装当成读数", async () => {
+  const f = fixture(async () => ({ balance: validBalance }));
+  f.accounts.splice(1);
+  const result = await f.service.refresh(f.accounts[0]);
+  assert.equal(result.value.total, 42);
+  assert.equal(f.values.get("balance:one").value.total, 42);
+  assert.equal(f.values.get("balance:one").error, undefined);
+  await f.service.stop();
+});
+
+test("旧的裸读数与裸 null 仍然被接受（向后兼容）", async () => {
+  // 裸读数：旧驱动直接返回 CreditBalance。
+  const ok = fixture(async () => validBalance);
+  ok.accounts.splice(1);
+  assert.equal((await ok.service.refresh(ok.accounts[0])).value.total, 42);
+  await ok.service.stop();
+
+  // 裸 null：旧语义的「查不到」，回落到通用文案。
+  const bad = fixture(async () => null);
+  bad.accounts.splice(1);
+  await assert.rejects(
+    bad.service.refresh(bad.accounts[0]),
+    /额度查询失败（凭据失效或响应异常）/,
+  );
+  await bad.service.stop();
+});
+
+test("网络失败等抛错也把真实原因落库，而不是只 throw", async () => {
+  const f = fixture(async () => { throw Error("额度查询网络失败：fetch failed"); });
+  f.accounts.splice(1);
+  await assert.rejects(f.service.refresh(f.accounts[0]), /fetch failed/);
+  assert.match(f.values.get("balance:one").error, /fetch failed/);
+  await f.service.stop();
+});

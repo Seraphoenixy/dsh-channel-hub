@@ -82,7 +82,6 @@ window.__ModuleLoader__.load({
       workbuddy: "#2fa58a",
       qoder: "#6b6ef5",
       qodercn: "#4c8fd9",
-      lobsterai: "#d97757",
       trae: "#2fa58a",
       loomy: "#d35d8a",
       raccoon: "#b47a2e",
@@ -676,7 +675,7 @@ window.__ModuleLoader__.load({
        * 包级「什么时候作废 / 什么时候重置」的文案。
        *
        * 优先 `expiresAt`（上游下发的扣费截止或到期时间，Buddy / WorkBuddy /
-       * Qoder / LobsterAI / Trae 都有）；没有才回落到 `resetAt`（计量周期结束，
+       * Qoder / Trae 都有）；没有才回落到 `resetAt`（计量周期结束，
        * 只有 Gemini 这类窗口式额度才有意义）。两者同时存在时只显示到期 ——
        * 以 Buddy 为例 `CycleEndTime` 是「每月刷新」，把它当「快作废」会误导。
        *

@@ -24,7 +24,7 @@
  * contain `src/index.ts`, so the watcher stays off there.
  *
  * Adapted from `dsh-our-free-model/src/reload.js` (MIT); the import and its
- * local changes are recorded in `sources.json`.
+ * local changes are described in `docs/ARCHITECTURE.md`.
  *
  * @module src/reload.ts
  */

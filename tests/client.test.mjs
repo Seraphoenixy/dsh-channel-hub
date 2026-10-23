@@ -386,7 +386,7 @@ test("daily chart axis lays labels out per bar slot", () => {
 });
 
 test("package rows show the upstream expiry inline, not only in a hover title", () => {
-  // 资源包类渠道（Buddy / WorkBuddy / Qoder / LobsterAI / Trae）会下发扣费截止
+  // 资源包类渠道（Buddy / WorkBuddy / Qoder / Trae）会下发扣费截止
   // 或到期时间，Gemini 下发窗口重置时刻。原先这些只在悬停 title 里，
   // 用户必须逐行悬停才看得到；现在同时渲染在包标题行上。
   assert.ok(source.includes("chub-pkgwhen"), "missing inline expiry element");

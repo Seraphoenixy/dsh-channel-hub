@@ -53,6 +53,58 @@ export function accountSnapshotKeys(account: {
   ];
 }
 
+/**
+ * 删除一个账号的凭据，失败时**不抛错**。
+ *
+ * ## 为什么需要它（真实缺陷，「删除报错但又能删掉」）
+ *
+ * 旧实现写的是 `await credentials.delete?.(ref)`，而宿主 `ctx.credentials`
+ * 的真实方法面只有 `resolve` / `describe` / `set` / `unset`（见
+ * `@deepseek-ai/dsh-credentials-local`）—— **没有 `delete`，也没有 `remove`**。
+ * 于是：
+ *
+ * - 可选调用 `?.` 只挡 `undefined`，挡不住「属性存在但是别的方法」这种情况；
+ *   本插件的命名空间代理对 `delete` 也放行，返回一个转调
+ *   `target['delete']` 的闭包，调用时抛
+ *   `TypeError: target[key] is not a function`；
+ * - 更糟的是这行位于 `pool.removeAccount()` **之后** —— 账号已经从池里消失，
+ *   错误却让整个 RPC 返回失败。界面于是弹一条「操作未完成」，而账号确实没了：
+ *   用户被同时告知「失败」与「成功」。
+ * - 抛出还跳过了后面的 `purgeAccountSnapshots()`，于是磁盘上留下四个孤儿键
+ *   （`catalog:` / `balance:` / `checkin:` / `identity:`），凭据本身也留在
+ *   `.credentials.yaml` 里（实测某 profile 残留 7 份已删账号的凭据）。
+ *
+ * 因此这里按**真实 API** 调 `unset`，并保留 `delete` 作为旧宿主的兜底；
+ * 两者都没有时静默跳过（该宿主没有凭据能力）。任何失败只记一条 warn ——
+ * 删号已经完成，不能因为清理凭据回滚成「失败」。
+ *
+ * @returns 是否真的调用并成功了一个删除方法。
+ */
+export async function purgeAccountCredential(
+  credentials: unknown,
+  ref: string,
+  logger?: Logger,
+): Promise<boolean> {
+  const service = credentials as Record<string, unknown> | undefined;
+  if (service === undefined || service === null) return false;
+  // 顺序：`unset` 是宿主当前 API；`delete` / `remove` 只作旧宿主兜底。
+  // `TypeError` 表示「名字看起来在、其实不是这个服务的方法」（命名空间代理
+  // 对未知方法也会返回闭包），此时继续试下一个名字，而不是当成清理失败。
+  for (const name of ["unset", "delete", "remove"] as const) {
+    const drop = service[name];
+    if (typeof drop !== "function") continue;
+    try {
+      await (drop as (ref: string) => Promise<unknown>).call(service, ref);
+      return true;
+    } catch (error) {
+      if (error instanceof TypeError) continue;
+      logger?.warn("账号凭据清理失败（" + ref + "）：" + redact(error));
+      return false;
+    }
+  }
+  return false;
+}
+
 export interface PurgeResult {
   /** 成功删除的键。 */
   purged: string[];

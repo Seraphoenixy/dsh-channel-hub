@@ -67,7 +67,15 @@
  * `description: "每日 10:00（UTC+8）刷新，领取后 30 天有效"`）。
  */
 
-import { roundCredits, type CheckinStatus, type ClaimOutcome, type CreditBalance, type CreditPackage } from './credits.js'
+import {
+  describeCreditFailure,
+  roundCredits,
+  type CheckinStatus,
+  type ClaimOutcome,
+  type CreditBalance,
+  type CreditBalanceResult,
+  type CreditPackage,
+} from './credits.js'
 import { QODER_BILLING_UTC_OFFSET_MS } from './model-queue.js'
 import { withQoderMachineHeadersAsync } from './qoder-machine.js'
 import { qoderBearerToken, type QoderCredential } from './qoder.js'
@@ -324,6 +332,22 @@ export async function fetchQoderCreditBalance(
   product: QoderProduct,
   fetcher: typeof fetch = fetch,
 ): Promise<CreditBalance | null> {
+  const result = await fetchQoderCreditBalanceDetailed(credential, product, fetcher)
+  return result.balance
+}
+
+/**
+ * {@link fetchQoderCreditBalance} 的**带原因**版本。
+ *
+ * 旧实现把所有失败都压成 `null`，面板只能显示「凭据失效或响应异常」——
+ * 而 Qoder 的非 2xx 里 401/403 与 5xx 的处置完全不同（前者要重新登录、
+ * 后者只要等）。把状态码与响应片段带出来，用户才能自己判断。
+ */
+export async function fetchQoderCreditBalanceDetailed(
+  credential: QoderCredential,
+  product: QoderProduct,
+  fetcher: typeof fetch = fetch,
+): Promise<CreditBalanceResult> {
   let response: Response
   try {
     response = await fetcher(`${product.openApiBase}${QODER_USAGE_PATH}`, {
@@ -331,30 +355,44 @@ export async function fetchQoderCreditBalance(
       headers: await creditsHeaders(credential, product),
       signal: AbortSignal.timeout(QODER_CREDITS_TIMEOUT_MS),
     })
-  } catch {
-    // 网络失败：返回 null（与其它 provider 同语义），不抛错。
-    return null
+  } catch (error) {
+    // 网络失败：保留底层原因（timeout / socket hang up 等），不吞诊断信息。
+    return {
+      balance: null,
+      error: `额度查询网络失败：${error instanceof Error ? error.message : String(error)}`,
+    }
   }
 
-  // 401/403 是凭据问题，其它非 2xx 是服务端问题 —— 两者都返回 null，
-  // 由调用方统一显示「查询失败」原因。
-  if (!response.ok) return null
+  // 先取文本再解析：非 2xx 时响应体往往带业务码/原因，直接 json() 会丢掉它们。
+  let text = ''
+  try {
+    text = await response.text()
+  } catch {
+    text = ''
+  }
+
+  if (!response.ok) {
+    return { balance: null, error: describeCreditFailure(response.status, text) }
+  }
 
   let body: unknown
   try {
-    body = await response.json()
+    body = JSON.parse(text)
   } catch {
-    return null
+    return { balance: null, error: `额度响应不是 JSON（HTTP ${response.status}）` }
   }
 
-  if (typeof body !== 'object' || body === null || Array.isArray(body)) return null
+  if (typeof body !== 'object' || body === null || Array.isArray(body))
+    return { balance: null, error: '额度响应不是 JSON 对象' }
   const root = body as Record<string, unknown>
 
-  // 企业版：无额度数字，只有外部链接。返回 null 而非 0（见函数注释）。
-  if (root.displayMode === 'enterprise') return null
+  // 企业版：无额度数字，只有外部链接。如实说明，而不是报 0。
+  if (root.displayMode === 'enterprise')
+    return { balance: null, error: '企业版账号不提供额度数字（仅外部链接查看）' }
 
   const usage = root.qoderUsage
-  if (typeof usage !== 'object' || usage === null) return null
+  if (typeof usage !== 'object' || usage === null)
+    return { balance: null, error: '额度响应里没有 qoderUsage' }
 
   const packages: CreditPackage[] = []
   // 顺序即展示顺序：套餐额度 → 赠送/资源包 → 专用资源包。
@@ -377,10 +415,11 @@ export async function fetchQoderCreditBalance(
 
   // 一个包都没解析出来 → 视为「查不到」（响应形状与预期不符），
   // 而不是「余额为 0」——后者会让用户以为额度被清空了。
-  if (packages.length === 0) return null
+  if (packages.length === 0)
+    return { balance: null, error: '额度响应里没有任何可识别的额度包' }
 
   const total = roundCredits(packages.reduce((sum, pkg) => sum + pkg.remaining, 0))
-  return { total, packages, expiredTotal: 0 }
+  return { balance: { total, packages, expiredTotal: 0 } }
 }
 
 /** 把 `CreditBalance` 压成一行可读摘要（供探针与日志使用）。 */

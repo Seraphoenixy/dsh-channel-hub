@@ -33,7 +33,7 @@ DSH 插件，保留三个入口：**渠道管理、数据看板、运行日志**
 
 ## 渠道
 
-CodeArts、CodeBuddy / WorkBuddy 国区、WorkBuddy 国际版、Qoder CN/国际版、LobsterAI、Trae CN IDE、Loomy、Raccoon、Gemini。
+CodeArts、CodeBuddy / WorkBuddy 国区、WorkBuddy 国际版、Qoder CN/国际版、Trae CN IDE、Loomy、Raccoon、Gemini。
 
 CodeBuddy CN 与 WorkBuddy 国区是同一产品（同一登录端点与账号体系），只保留 `buddy` 一个渠道，不设 `workbuddy-cn` 别名或迁移层。
 
@@ -94,6 +94,6 @@ dsh plugin --profile desktop add "D:\project\dsh-channel-hub"
 - 默认不保存提示词和回复正文。清理明细不会清掉历史累计。
 - 账号级快照与控制状态同库不同键：快照按 `catalog:<provider>:<id>` / `balance:<id>` / `checkin:<id>` / `identity:<provider>/<id>` 存（键名集中在 `src/core/account-cleanup.ts`，新增一类必须同步登记），删号时随账号一起删；`import:<source>:<id>` 是导入源去重标记、不属于账号快照，删号时刻意保留，避免下次启动又把这个旧账号导回来。
 
-详细结构见 [架构说明](docs/ARCHITECTURE.md)，验收状态见 [验收记录](docs/ACCEPTANCE.md)，渠道页布局的现状分析与改进方案见 [布局方案](docs/LAYOUT.md)。来源与改动记录见 [sources.json](sources.json)，许可证见 [LICENSE](LICENSE)。
+详细结构见 [架构说明](docs/ARCHITECTURE.md)（含 vendor 上游来源与基线提交），验收状态见 [验收记录](docs/ACCEPTANCE.md)（含每处 vendor 改动的原因与验证方式），渠道页布局的现状分析与改进方案见 [布局方案](docs/LAYOUT.md)，许可证见 [LICENSE](LICENSE)。
 
 网页登录渠道在点击登录后自动唤起系统默认浏览器。若浏览器未能启动，页面保留同一次授权的可点击链接；无需重新发起登录。Loomy 默认使用微信扫码，扫码页同样是本地页面；也可切换短信验证码登录。

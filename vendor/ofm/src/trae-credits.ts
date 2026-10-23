@@ -46,7 +46,13 @@ import {
   type TraeCredential,
 } from './trae.js'
 import type { TraeProduct } from './trae-product.js'
-import type { CheckinStatus, ClaimOutcome, CreditBalance, CreditPackage } from './credits.js'
+import type {
+  CheckinStatus,
+  ClaimOutcome,
+  CreditBalance,
+  CreditBalanceResult,
+  CreditPackage,
+} from './credits.js'
 
 // ── 错误分类与冷却时间（对齐 trae-mate `cooldown.rs`）──
 
@@ -315,9 +321,24 @@ export async function claimTraeDailyCheckin(
  */
 export async function fetchTraeCreditBalance(
   credential: TraeCredential,
-  _product: TraeProduct,
+  product: TraeProduct,
   fetcher: typeof fetch = fetch,
 ): Promise<CreditBalance | null> {
+  const result = await fetchTraeCreditBalanceDetailed(credential, product, fetcher)
+  return result.balance
+}
+
+/**
+ * {@link fetchTraeCreditBalance} 的**带原因**版本。
+ *
+ * `postJson` 本就把 `message`（含 `HTTP 429: …` 一类片段）与 `httpStatus`
+ * 整理好了，旧实现却直接 `return null` 把它们丢掉，面板只剩一句通用文案。
+ */
+export async function fetchTraeCreditBalanceDetailed(
+  credential: TraeCredential,
+  _product: TraeProduct,
+  fetcher: typeof fetch = fetch,
+): Promise<CreditBalanceResult> {
   const result = await postJson(
     TRAE_ENT_USAGE_PATH,
     credential,
@@ -325,10 +346,15 @@ export async function fetchTraeCreditBalance(
     fetcher,
     credential.uid,
   )
-  if (!result.ok) return null
+  if (!result.ok) {
+    return { balance: null, error: `额度查询失败：${result.message}` }
+  }
   const body = result.body
   const packList = body.user_entitlement_pack_list
-  if (!Array.isArray(packList) || packList.length === 0) return null
+  if (!Array.isArray(packList))
+    return { balance: null, error: '额度响应里没有 user_entitlement_pack_list' }
+  if (packList.length === 0)
+    return { balance: null, error: '额度响应里的资源包列表为空' }
 
   const packages: CreditPackage[] = []
   let total = 0
@@ -377,7 +403,7 @@ export async function fetchTraeCreditBalance(
     total += pkg.remaining
   }
 
-  return { total, packages, expiredTotal }
+  return { balance: { total, packages, expiredTotal } }
 }
 
 // ── 处理器工厂（与 `channel-pack-rpc.ts` 协作）──

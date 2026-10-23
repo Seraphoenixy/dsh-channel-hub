@@ -392,8 +392,24 @@ export class LedgerDatabase {
     // 只取需要的行（过滤已下推）；列仍然全取，因为分组要用 day/model/provider。
     return this.db.prepare("SELECT * FROM daily" + where).all(...args);
   }
-  private promote(id: string, m: Metrics) {
-    return { id, name: this.get("identity:" + id) ?? id, ...present(m) };
+  /**
+   * 把 `identity:<key>` 里存的显示名贴到一行指标上。
+   *
+   * ⚠️ **`fallback` 必须由调用方给出**（真实缺陷，2026-10-23）：早先实现
+   * 缺省回落到 `id` 本身，而 `id` 对「模型 / 账号」分组是**复合键**
+   * `provider + "/" + name`。界面又在它前面单独渲染了一次 `provider`
+   * （「来源 / 名称」两段式），于是同一行的来源被拼了两次，显示成
+   * `workbuddy / workbuddy/deepseek-v4.1-flash`。
+   *
+   * 复合键场景必须传**裸名称**（模型名 / 账号 id）作为兜底；只有纯键
+   * （如 `series` 的日期）才允许 `id` 本身。
+   *
+   * @param id 查询 `identity:` 用的键（可能是复合键）。
+   * @param m 指标。
+   * @param fallback identity 无记录时显示的文本。
+   */
+  private promote(id: string, m: Metrics, fallback: string = id) {
+    return { id, name: this.get("identity:" + id) ?? fallback, ...present(m) };
   }
   /**
    * 当前筛选范围内的轮次 / 步数。
@@ -453,8 +469,10 @@ export class LedgerDatabase {
       }
       return [...out].map(([key, m]) => {
         const { provider, ...metrics } = m;
-        // 名字仍按 identity 表补（模型没有 identity 记录时回落到模型名本身）。
-        return { ...this.promote(key, metrics), provider, model: key.slice(provider.length + 1) };
+        const model = key.slice(provider.length + 1);
+        // 名字仍按 identity 表补；**没有记录时兜底为纯模型名**，
+        // 不能是复合键（界面已在前面渲染了 provider，见 `promote` 的说明）。
+        return { ...this.promote(key, metrics, model), provider, model };
       });
     };
     return {
@@ -538,7 +556,8 @@ export class LedgerDatabase {
       });
     }
     return [...out].map(([key, entry]) => ({
-      ...this.promote(key, entry.metrics),
+      // 兜底用**账号 id**，不是复合键 —— 界面已单独渲染 `provider`。
+      ...this.promote(key, entry.metrics, entry.accountId),
       provider: entry.provider,
       accountId: entry.accountId,
     }));

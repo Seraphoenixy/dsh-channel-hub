@@ -15,6 +15,7 @@ import { redact, type Account, type Filter } from "./core/types.ts";
 import { creditReading } from "./core/credits.ts";
 import {
   orphanAccounts,
+  purgeAccountCredential,
   purgeAccountSnapshots,
 } from "./core/account-cleanup.ts";
 import { createDrivers } from "./drivers/ofm.js";
@@ -30,9 +31,34 @@ export async function apply(ctx: any) {
     "CHANNEL_HUB_" +
     createHash("sha256").update(data).digest("hex").slice(0, 12) +
     "_";
+  /**
+   * 凭据 ref 的命名空间代理。
+   *
+   * ## 为什么必须逐个列出方法名（真实缺陷）
+   *
+   * 宿主把每个插件的凭据 ref 加上 `CHANNEL_HUB_<hash>_` 前缀保存（同名 ref 在
+   * 多个插件间才不会撞车），因此**每一个按 ref 读写的方法都必须加前缀**。
+   * 旧实现只列了 `resolve` / `set` / `delete` / `remove` 四个，其中后两个在
+   * 宿主 `ctx.credentials` 上**根本不存在**（真实方法面是 `resolve` /
+   * `describe` / `set` / `unset`）。两个后果：
+   *
+   * 1. `delete` 不在服务上 → 删号时报 `TypeError: target[key] is not a function`，
+   *    而账号已经被删掉，于是「报错 + 删除成功」同时发生；
+   * 2. `unset` **没被列出** → 落到下面的兜底分支，`bind(target)` 后直接用
+   *    **未加前缀**的 ref 调用，删的是 `ACCOUNT_x` 而非
+   *    `CHANNEL_HUB_…_ACCOUNT_x`。宿主对不存在的键是 no-op，所以厂商
+   *    `removeAccount()` 里的注销**一直在静默空转**，凭据永久留在
+   *    `.credentials.yaml` 里（实测某 profile 残留 7 份已删账号的凭据）。
+   *
+   * 因此这里列全**按 ref 寻址**的方法：`resolve` / `describe` / `set` / `unset`。
+   * 记录（record）那一组（`readRecord` / `modifyRecord` / `deleteRecord` …）
+   * 以 `<scope>/<id>` 寻址，不走 ref，**不能**加这个前缀。
+   *
+   * @param ref 裸 ref（不带命名空间），由代理补上前缀。
+   */
   const credentials = new Proxy(ctx.credentials, {
     get(target, key) {
-      if (["resolve", "set", "delete", "remove"].includes(String(key)))
+      if (["resolve", "describe", "set", "unset", "delete", "remove"].includes(String(key)))
         return (ref: string, ...args: any[]) =>
           target[key](namespace + String(ref), ...args);
       const value = target[key];
@@ -201,7 +227,12 @@ export async function apply(ctx: any) {
       // only unsets the credential and filters the array, leaving catalog / balance /
       // checkin / identity rows behind forever (see core/account-cleanup.ts).
       await engine.pool.removeAccount(a.id);
-      await credentials.delete?.(a.credentialRef);
+      // ⚠️ 必须用 `unset`（宿主真实 API），且必须在 `removeAccount` **之后**、
+      // 且**不得抛错**：旧实现写 `credentials.delete?.()`，而宿主的
+      // `ctx.credentials` 根本没有 `delete` —— 调用抛 TypeError，账号却已经
+      // 从池里删掉了，于是「报错 + 删除成功」同时发生（真实缺陷）。抛错还
+      // 跳过了下面的快照清理与凭据删除，留下孤儿键与残留凭据。
+      await purgeAccountCredential(credentials, a.credentialRef, ctx.logger);
       catalog.forget(a.provider + ":" + a.id);
       await purgeAccountSnapshots(store, a, ctx.logger);
       ctx.emit("llm/adapters-updated");

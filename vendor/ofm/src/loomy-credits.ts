@@ -37,7 +37,12 @@
  * 这样「打开面板」不会悄悄触发签到。
  */
 
-import type { ClaimOutcome, CreditBalance, CreditPackage } from './credits.js'
+import type {
+  ClaimOutcome,
+  CreditBalance,
+  CreditBalanceResult,
+  CreditPackage,
+} from './credits.js'
 import {
   LOOMY_AUTH_ERROR_CODE,
   LOOMY_REQUEST_TIMEOUT_MS,
@@ -125,29 +130,57 @@ export async function fetchLoomyCreditDetail(
   product: LoomyProduct,
   fetcher: typeof fetch = fetch,
 ): Promise<LoomyCreditDetail | null> {
+  const result = await fetchLoomyCreditDetailDetailed(credential, product, fetcher)
+  return result.detail
+}
+
+/**
+ * {@link fetchLoomyCreditDetail} 的**带原因**版本。
+ *
+ * `tryRequestLoomy` 已经给出 `code` / `message`（如 `NETWORK`、
+ * `HTTP_500`、业务码），旧实现把它直接丢掉，面板只能显示通用文案。
+ */
+export async function fetchLoomyCreditDetailDetailed(
+  credential: LoomyCredential,
+  product: LoomyProduct,
+  fetcher: typeof fetch = fetch,
+): Promise<
+  | { detail: LoomyCreditDetail; error?: undefined }
+  | { detail: null; error: string }
+> {
   const result = await tryRequestLoomy<Record<string, unknown>>(
     credential, product,
     '/points/records?pageNo=1&pageSize=1&recordType=all',
     { method: 'GET' }, fetcher,
   )
-  if (!result.ok) return null
+  if (!result.ok) {
+    return {
+      detail: null,
+      error: result.code.length > 0
+        ? `额度查询失败（${result.code}）：${result.message}`
+        : `额度查询失败：${result.message}`,
+    }
+  }
 
   const permanent = readNumber(result.data?.balance)
   const daily = readNumber(result.data?.dailyBalance)
   const available = readNumber(result.data?.availableBalance)
   // `balance` 是核心字段：没有它就说明响应形状不对，不编造数字。
-  if (permanent === undefined) return null
+  if (permanent === undefined)
+    return { detail: null, error: '额度响应里没有 balance 字段' }
 
   const total = available ?? (permanent + (daily ?? 0))
   return {
-    permanent,
-    daily: daily ?? 0,
-    total,
-    dailyQuota: readNumber(result.data?.dailyQuota),
-    dailyConsumed: readNumber(result.data?.dailyConsumed),
-    dailyCycleDate: typeof result.data?.dailyCycleDate === 'string'
-      ? result.data.dailyCycleDate
-      : undefined,
+    detail: {
+      permanent,
+      daily: daily ?? 0,
+      total,
+      dailyQuota: readNumber(result.data?.dailyQuota),
+      dailyConsumed: readNumber(result.data?.dailyConsumed),
+      dailyCycleDate: typeof result.data?.dailyCycleDate === 'string'
+        ? result.data.dailyCycleDate
+        : undefined,
+    },
   }
 }
 
@@ -189,16 +222,29 @@ export async function fetchLoomyCreditBalance(
   product: LoomyProduct,
   fetcher: typeof fetch = fetch,
 ): Promise<CreditBalance | null> {
-  const detail = await fetchLoomyCreditDetail(credential, product, fetcher)
-  if (detail === null) return null
+  const result = await fetchLoomyCreditBalanceDetailed(credential, product, fetcher)
+  return result.balance
+}
+
+/** {@link fetchLoomyCreditBalance} 的**带原因**版本。 */
+export async function fetchLoomyCreditBalanceDetailed(
+  credential: LoomyCredential,
+  product: LoomyProduct,
+  fetcher: typeof fetch = fetch,
+): Promise<CreditBalanceResult> {
+  const result = await fetchLoomyCreditDetailDetailed(credential, product, fetcher)
+  if (result.detail === null) return { balance: null, error: result.error }
+  const detail = result.detail
   return {
-    total: detail.total,
-    packages: [
-      makePackage('永久积分', detail.permanent),
-      makePackage('每日赠送', detail.daily),
-    ],
-    // 两池都视为有效额度，没有「已失效」概念。
-    expiredTotal: 0,
+    balance: {
+      total: detail.total,
+      packages: [
+        makePackage('永久积分', detail.permanent),
+        makePackage('每日赠送', detail.daily),
+      ],
+      // 两池都视为有效额度，没有「已失效」概念。
+      expiredTotal: 0,
+    },
   }
 }
 

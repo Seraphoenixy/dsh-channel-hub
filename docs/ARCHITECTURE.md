@@ -44,6 +44,16 @@ SQLite 表包含 requests、attempts、daily 和 kv。daily 的空账号行用�
 
 vendor 中保留来源快照用于比对；构建只跟随真实 import 图，不加载旧 index、RPC、网关及其他平台功能。新版本每月审查上游差异，按问题移植，不全量合并。
 
+上游来源（用于比对与追溯）：
+
+| vendor | 上游仓库 | 基线提交 |
+|---|---|---|
+| `vendor/ofm/src/` | `https://github.com/Ebony-Vinyl/dsh-our-free-model` | `5923ebef0f55578ca21bb5555b7ba5adb51aef21` |
+| `vendor/connect/` | `https://github.com/chengshenyangtai/dsh-workbuddy-trae-qoder-connect` | `3738a114f121d8198ceeaf6e02763eb97a2fc109` |
+| Qoder 目录解析器参考 | `https://gitee.com/iJetLi/deepseek-harness-codearts` | `9719ccffb975d18df32ac17948d46938c3b5e6fd` |
+
+逐文件哈希清单已移除：它没有消费方（没有脚本或 CI 读取），且实测从首次提交起就与磁盘文件不符（114 个条目中 59 个不一致，含从未改动过的文件），继续维护只会产生「看起来在核对、其实早已漂移」的假安全感。**本地改动以验收记录为准**（`docs/ACCEPTANCE.md` 逐条写明改了什么、为什么、如何验证），比一组对不上的哈希可读且可审计。
+
 ## 边界
 
 没有自动安装、真实账号导入或部署操作。浏览器入口目前完成构建、组件注册与模拟状态的静态布局检查，尚未完成真实桌面窗口的视觉与交互验收。各渠道真实登录、余额、领取、续期、推理必须逐项补充验收记录。`src/reload.ts` 只在存在 `src/index.ts` 的检出中启用，安装包不包含源码；首次启用仍需重启 DSH。

@@ -14,7 +14,6 @@
   "files": [
     "cordis.patch.yml",
     "LICENSE",
-    "sources.json",
     "docs/ACCEPTANCE.md",
     "dist/index.js",
     "dist/client.js",

@@ -81,7 +81,7 @@ test("a package without a face value shows remaining only and no invented 100%",
           name: "每日登录奖励",
           unit: "credit",
           remaining: 92.73,
-          // LobsterAI 只下发剩余量，不区分周期总额。
+          // 只下发剩余量、不区分周期总额的渠道：total 如实置 0。
           total: 0,
           used: 0,
           active: true,

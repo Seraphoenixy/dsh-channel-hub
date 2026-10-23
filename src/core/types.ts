@@ -79,6 +79,64 @@ export interface Logger {
   warn(message: string): void;
   info?(message: string): void;
 }
+
+/**
+ * 把一次失败的 HTTP 响应整理成「带原因」的目录错误文本。
+ *
+ * ## 为什么需要它（真实缺陷，2026-10-23）
+ *
+ * 目录刷新过去只写 `"目录 HTTP " + status`，把响应体整个丢掉。于是用户看到
+ * 「目录 HTTP 403」，而实际原因可能是**账号被禁用**（`{"code":40302,
+ * "message":"账号已被禁用"}`）、额度耗尽、或该模型无权限 —— 403 同时覆盖这
+ * 四种语义，只看状态码无法归因，排查只能去翻数据库按时间线反推。
+ *
+ * 同一时期额度查询已经修成透传上游 `code` / `msg`，目录这条链路是同一个
+ * 毛病，故统一到同一口径。
+ *
+ * @param label - 渠道前缀，如 `"目录"` / `"Gemini 目录"`。
+ * @param status - HTTP 状态码。
+ * @param body - 响应体原文（非 JSON 也照收，只截片段）。
+ * @returns 如 `目录 HTTP 403：code 40302：账号已被禁用`。
+ */
+export function describeHttpFailure(
+  label: string,
+  status: number,
+  body: string,
+): string {
+  const head = `${label} HTTP ${status}`;
+  const text = body.trim();
+  if (text.length === 0) return head;
+  let detail = "";
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      // 各家后端把原因放在不同字段；漏认一个就会把已说清的原因降级成状态码。
+      const code = record.code ?? record.error_code ?? record.status;
+      const message =
+        record.msg ??
+        record.message ??
+        record.error_msg ??
+        record.error ??
+        record.error_description ??
+        record.detail;
+      const parts: string[] = [];
+      if (code !== undefined && code !== null && String(code).length > 0)
+        parts.push(`code ${String(code)}`);
+      if (typeof message === "string" && message.trim().length > 0)
+        parts.push(message.trim());
+      detail = parts.join("：");
+    }
+  } catch {
+    // 非 JSON（网关 HTML 页一类）：截一段原文，也比只有状态码有用。
+    detail = text.slice(0, 200).replace(/\s+/g, " ");
+  }
+  if (detail.length === 0) {
+    // 解析成功但没有任何可读字段：退回一段原始片段，别假装没有响应体。
+    detail = text.slice(0, 200).replace(/\s+/g, " ");
+  }
+  return detail.length > 0 ? `${head}：${detail}` : head;
+}
 /**
  * 把任意抛出物整理成一句可读、已脱敏的短文本。
  *

@@ -22,6 +22,16 @@ test(
     const { credentialRef } = await import("@deepseek-ai/dsh-credentials");
     const ctx = new Context();
     const records = new Map();
+    /**
+     * 镜像宿主 `ctx.credentials` 的**真实方法面**。
+     *
+     * ⚠️ 这里刻意**只有** `resolve` / `describe` / `set` / `unset` —— 与
+     * `@deepseek-ai/dsh-credentials-local` 一致。曾经的桩多写了一个
+     * `delete()`，于是插件里那句 `credentials.delete?.()` 在这个夹具里畅通无阻，
+     * 直到真实宿主上才抛 `TypeError: target[key] is not a function`，
+     * 表现为「删除报错但账号又确实删掉了」。夹具方法面一旦比真机宽，
+     * 测试就不再证明任何东西。
+     */
     class Credentials extends Service {
       constructor(ctx) {
         super(ctx, "credentials");
@@ -31,11 +41,16 @@ test(
         const value = records.get(ref);
         return value === undefined ? undefined : { value, source: "test" };
       }
+      async describe(ref) {
+        credentialRef(ref);
+        return { configured: records.has(ref), writable: true };
+      }
       async set(ref, value) {
         credentialRef(ref);
         records.set(ref, value);
       }
-      async delete(ref) {
+      async unset(ref) {
+        credentialRef(ref);
         records.delete(ref);
       }
     }
@@ -93,7 +108,12 @@ test(
       const channels = await plugin.dispatch("channels.list");
       const errors = channels.filter((c) => c.error);
       assert.deepEqual(errors, []);
-      assert.equal(channels.length, 10);
+      assert.equal(channels.length, 9);
+      assert.equal(
+        channels.some((c) => c.id === "lobsterai"),
+        false,
+        "LobsterAI support was removed from this build",
+      );
       assert.equal(
         channels.some((c) => c.id === "workbuddy-cn"),
         false,
@@ -173,10 +193,28 @@ test(
         seed(key, { seeded: true });
       seed("checkin:buddy-1", { seeded: true }); // 对照：别的账号的键不能被误删
       ledger.close();
+      // 凭据：删号必须连带注销凭据，且不能因为「宿主没有 delete 方法」而报错。
+      // ref 由插件加 `CHANNEL_HUB_<hash>_` 前缀，这里按同一算法预置。
+      const namespace =
+        "CHANNEL_HUB_" +
+        createHash("sha256").update(data).digest("hex").slice(0, 12) +
+        "_";
+      records.set(namespace + "ZCODE_ORPHAN", "orphan-secret");
+      records.set(namespace + "BUDDY_1", "buddy-secret"); // 对照：别的账号的凭据不能误删
 
       assert.equal(
         await plugin.dispatch("accounts.delete", { id: "zcode-orphan" }),
         true,
+      );
+      assert.equal(
+        records.has(namespace + "ZCODE_ORPHAN"),
+        false,
+        "deleting an account must unset its credential (the host API is unset, not delete)",
+      );
+      assert.equal(
+        records.get(namespace + "BUDDY_1"),
+        "buddy-secret",
+        "other accounts' credentials must survive",
       );
       assert.deepEqual(await plugin.dispatch("accounts.orphans"), []);
       assert.deepEqual(
@@ -582,7 +620,7 @@ test(
       fiber = ctx.plugin(await import("../dist/index.js"));
       while (fiber.inertia) await fiber.inertia;
       assert.equal(fiber.state, 2, String(fiber._error));
-      assert.equal(llm.adapters.size, 10);
+      assert.equal(llm.adapters.size, 9);
       await fiber.dispose();
       assert.equal(llm.adapters.size, 0);
     } finally {

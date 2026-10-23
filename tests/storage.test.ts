@@ -222,12 +222,34 @@ test("同一模型名跨渠道时按渠道分开统计，并回传来源字段",
     for (const row of all.models) {
       assert.ok(row.provider === "buddy" || row.provider === "trae", String(row.provider));
       assert.equal(row.model, "shared-model");
+      /*
+       * ⚠️ 真实缺陷（2026-10-23）：`name` 在 identity 无记录时曾回退成**复合键**
+       * `provider/model`，而界面又在它前面单独渲染了 `provider` ——
+       * 结果是 `buddy / buddy/shared-model`，来源被拼了两次。
+       * 兜底必须是裸模型名。
+       */
+      assert.equal(
+        row.name,
+        "shared-model",
+        "identity 无记录时 name 必须是裸模型名，不能是 provider/model 复合键",
+      );
+      assert.equal(
+        row.provider + " / " + row.name,
+        row.provider + " / shared-model",
+        "「来源 / 名称」只能出现一次来源",
+      );
     }
     // 账号分组同样带上来源与账号 id。
     for (const row of all.accounts) {
       assert.equal(typeof row.provider, "string");
       assert.equal(typeof row.accountId, "string");
       assert.equal(row.id, row.provider + "/" + row.accountId);
+      // 同上：兜底是裸账号 id，不能是 provider/accountId。
+      assert.equal(
+        row.name,
+        row.accountId,
+        "identity 无记录时 name 必须是裸账号 id，不能是复合键",
+      );
     }
   } finally {
     db.close();
