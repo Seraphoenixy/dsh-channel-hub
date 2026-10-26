@@ -402,6 +402,15 @@
 .chub-modelname{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--chub-text-2)}
 .chub-promo{flex:none;padding:0 5px;border-radius:999px;background:color-mix(in srgb,var(--chub-warn) 14%,transparent);color:color-mix(in srgb,var(--chub-warn) 80%,var(--chub-text));font-size:11px;font-weight:600;line-height:1.6;letter-spacing:0;white-space:nowrap}
 .chub-factor{flex:none;padding:0 5px;border:1px solid color-mix(in srgb,var(--chan-accent) 22%,transparent);border-radius:999px;background:color-mix(in srgb,var(--chan-accent) 10%,var(--chub-layer-2));color:color-mix(in srgb,var(--chan-accent) 68%,var(--chub-text));font-size:11px;font-weight:650;line-height:1.6;font-variant-numeric:tabular-nums;letter-spacing:0;white-space:nowrap}
+/* 上下文档位徽标：未启用时虚线弱化，启用后实心 —— 一眼区分「能开」与「已开」。
+   与 .chub-factor 并列在模型行尾，宽度有限故只放窗口数值（1M / 200K）。 */
+.chub-tier{flex:none;padding:0 5px;border:1px dashed color-mix(in srgb,var(--chub-text-3) 46%,transparent);border-radius:999px;background:transparent;color:var(--chub-text-3);font-size:11px;font-weight:600;line-height:1.6;font-variant-numeric:tabular-nums;letter-spacing:0;white-space:nowrap}
+.chub-tier.on{border-style:solid;border-color:color-mix(in srgb,var(--chub-accent) 40%,transparent);background:color-mix(in srgb,var(--chub-accent) 14%,var(--chub-layer-2));color:color-mix(in srgb,var(--chub-accent) 72%,var(--chub-text))}
+/* 大窗口档开关：与「账号 N/M」「模型 N」同排。不抢空间，靠 .chub-chanacts 的
+   margin-left:auto 让按钮组留在行尾。 */
+.chub-context-toggle{display:inline-flex;align-items:center;gap:4px;flex:none;font-size:12px;line-height:1.5;color:var(--chub-text-3);cursor:pointer;white-space:nowrap}
+.chub-context-toggle input{width:13px;height:13px;margin:0;flex:none;accent-color:var(--chub-accent)}
+.chub-context-toggle:hover{color:var(--chub-text-2)}
 .chub-panel{display:flex;flex-direction:column;gap:10px;min-width:0;padding:14px 15px;border:1px solid var(--chub-line-soft);border-radius:14px;background:linear-gradient(160deg,var(--chub-layer-1),color-mix(in srgb,var(--chub-layer-1) 62%,transparent))}
 .chub-panelhead{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
 .chub-panelhead>div:first-child{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 280px}

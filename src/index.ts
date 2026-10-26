@@ -129,6 +129,9 @@ export async function apply(ctx: any) {
         .map((d: any) => d.reload()),
     );
   // Hydrate saved account directories before starting discovery. Do not publish static vendor tables.
+  // ⚠️ `restore()` 必须先于 `hydrate()`：渠道级设置（Trae 的大窗口档）
+  // 会影响 `resolveModel` 与模型名后缀，晚一步首屏会按默认值渲染。
+  await engine.restore();
   await engine.hydrate();
   // Accounts whose channel is not registered in this build are invisible everywhere:
   // `channels.list` and the model menu both enumerate drivers, and login / renew /
@@ -165,6 +168,21 @@ export async function apply(ctx: any) {
           canBalance: !!d.balance,
           canLogin: true,
           selectedAccountId: await engine.selection.get(d.id),
+          /**
+           * 大窗口档（目前只有 Trae 的 Max 1M）。
+           *
+           * ⚠️ 只对有该能力的渠道下发 `supported: true`：其余渠道的
+           * `extendedContext` 是 undefined，界面据此不渲染开关，而不是渲染一个
+           * 点了报错的按钮。
+           */
+          ...(d.extendedContext?.supported
+            ? {
+                extendedContext: {
+                  supported: true,
+                  enabled: d.extendedContext.enabled(),
+                },
+              }
+            : {}),
           accounts: await Promise.all(
             accounts
               .filter((a: Account) => a.provider === d.id)
@@ -200,6 +218,16 @@ export async function apply(ctx: any) {
         throw Error("Invalid account selection");
       await engine.selection.set(p.provider, p.accountId);
       await engine.drivers.get(p.provider)?.hydrate?.();
+      ctx.emit("llm/adapters-updated");
+      return true;
+    }
+    if (method === "channels.setExtendedContext") {
+      const d = engine.drivers.get(String(p.provider));
+      if (!d?.extendedContext?.supported) throw Error("该渠道没有大窗口档");
+      if (typeof p.enabled !== "boolean")
+        throw Error("enabled must be boolean");
+      await d.extendedContext.set(p.enabled);
+      // 档位变了 ⇒ 模型的 `context` 与展示名都变，必须让宿主重读目录。
       ctx.emit("llm/adapters-updated");
       return true;
     }

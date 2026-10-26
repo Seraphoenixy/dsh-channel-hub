@@ -130,6 +130,22 @@ test(
         true,
         "Trae CN IDE must expose its native callback login",
       );
+      /**
+       * 大窗口档：只有 Trae 声明该能力，且**默认关闭**。
+       *
+       * 默认关是本次修正的核心（目录只下发一个 `consumption_rate`，
+       * 开启 Max 后界面显示的倍率与实扣不符）。其余渠道不得出现这个开关。
+       */
+      assert.deepEqual(
+        trae?.extendedContext,
+        { supported: true, enabled: false },
+        "the extended window tier must be opt-in and default off",
+      );
+      assert.equal(
+        channels.filter((c) => c.extendedContext).length,
+        1,
+        "no other channel has an extended window tier",
+      );
       assert.equal(
         channels.some((c) => c.id === "trae-cn" || c.id === "trae-solo"),
         false,
@@ -163,6 +179,48 @@ test(
         items: [],
       });
       assert.deepEqual(await plugin.dispatch("migration.preview"), []);
+      /**
+       * 大窗口档开关：真实 RPC 路径 + 落库 + 拒绝非法渠道。
+       *
+       * ⚠️ 这里断言的是**开关本身**，不是「Trae 真的走 1M」——后者需要真实
+       * 账号与远端 `max_mode` 目录，属于真实验收，不能用夹具冒充。
+       */
+      await plugin.dispatch("channels.setExtendedContext", {
+        provider: "trae",
+        enabled: true,
+      });
+      assert.equal(
+        (await plugin.dispatch("channels.list")).find((c) => c.id === "trae")
+          .extendedContext.enabled,
+        true,
+        "turning the tier on must be visible to the UI immediately",
+      );
+      await plugin.dispatch("channels.setExtendedContext", {
+        provider: "trae",
+        enabled: false,
+      });
+      assert.equal(
+        (await plugin.dispatch("channels.list")).find((c) => c.id === "trae")
+          .extendedContext.enabled,
+        false,
+      );
+      await assert.rejects(
+        () =>
+          plugin.dispatch("channels.setExtendedContext", {
+            provider: "qoder",
+            enabled: true,
+          }),
+        /大窗口档/,
+        "a channel without the tier must reject rather than silently accept",
+      );
+      await assert.rejects(
+        () =>
+          plugin.dispatch("channels.setExtendedContext", {
+            provider: "trae",
+            enabled: "yes",
+          }),
+        /boolean/,
+      );
       // 渠道未注册的账号（驱动不存在）：必须被报告出来，而不是隐形留在磁盘上。
       // 真实遗留：删掉 zcode 驱动后，账号行与三个快照键又活了 26 小时。
       assert.deepEqual(
@@ -240,6 +298,27 @@ test(
         keys.includes("checkin:buddy-1"),
         true,
         "other accounts' snapshots must survive",
+      );
+      /**
+       * 大窗口档开关必须**跨重启存活**：它是用户显式选择，不能每次启动都退回
+       * 产品默认（那等于每次都替用户重选一次）。
+       *
+       * 这里直接读库确认落的是布尔值 —— 存成字符串 "true" 会在 `restore()`
+       * 的 `typeof saved === "boolean"` 判断处被静默丢掉。
+       */
+      await plugin.dispatch("channels.setExtendedContext", {
+        provider: "trae",
+        enabled: true,
+      });
+      const persisted = new DatabaseSync(join(data, "ledger.sqlite"));
+      const stored = persisted
+        .prepare("SELECT data FROM kv WHERE key=?")
+        .get("extended-context:trae");
+      persisted.close();
+      assert.equal(
+        JSON.parse(String(stored?.data)),
+        true,
+        "the tier switch must be stored as a JSON boolean",
       );
     } finally {
       await plugin?.stop();
@@ -539,6 +618,27 @@ test(
       const google = await llm.listModels("channel-hub/gemini");
       assert.equal(google.length, 1);
       assert.equal(google[0].name, "Dynamic Gemini");
+      /**
+       * 上下文窗口必须经 `resolveModelInfo` 送到宿主。
+       *
+       * `listModels` 的返回值**不含** `context`（宿主
+       * `normalizeModelInfo` 只从 `resolveModel` 取），故这里读 `prepareCall`
+       * 的结果 —— 它才是 `dsh-compaction-basic` 定价自动压缩阈值的来源。
+       * 夹具的 Gemini 目录只有 `displayName`（与真实响应同形），窗口必须由
+       * 静态表补位；漏了这条，宿主会在每一步抛
+       * `no context capacity for channel-hub/gemini/…`。
+       */
+      const geminiCall = await llm.prepareCall({
+        provider: "channel-hub/gemini",
+        model: "gemini-3.8-flash",
+      });
+      // `prepareCall` 把上下文放在**返回值的 `context`**（不是 `config`），
+      // 见宿主 `resolveCallWithInfo`。
+      assert.equal(
+        geminiCall.context?.contextWindow,
+        1_000_000,
+        "the Gemini static window must reach the host",
+      );
       const catalog = await llm.listModels("channel-hub/qodercn");
       assert.equal(catalog.length, 1);
       assert.match(catalog[0].name, /0×/);

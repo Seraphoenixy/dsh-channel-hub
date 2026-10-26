@@ -1,4 +1,5 @@
 import { rateLabel, promotionNote, promotionWindow } from "./core/rate.ts";
+import { extendedTierBadge } from "./core/context.ts";
 import css from "./client.css";
 
 declare const window: Window & { __ModuleLoader__: any };
@@ -1531,6 +1532,37 @@ window.__ModuleLoader__.load({
                             ? "目录 · " + ago(latest)
                             : "目录未更新",
                       ),
+                      /**
+                       * 大窗口档开关（目前只有 Trae 的 Max 1M）。
+                       *
+                       * ⚠️ **必须显式标注「计费不同」**：目录只下发一个
+                       * `consumption_rate`，实测没有 Max 档倍率字段
+                       * （`fee_model_level` 恒 2、`is_dollar_max` 恒 null），
+                       * 所以界面无法显示「开了之后是几倍」。能说清的只有
+                       * 「可能更贵」这一句 —— 不说等于默认替用户选了未知价格。
+                       */
+                      c.extendedContext?.supported &&
+                        h(
+                          "label",
+                          {
+                            className: "chub-context-toggle",
+                            title:
+                              "开启后该渠道走大窗口档（如 Trae 的 1M）。" +
+                              "上游按另一档单独计价，目录不下发该档倍率 —— " +
+                              "显示的是常规档倍率，实际扣费可能更高。",
+                          },
+                          h("input", {
+                            type: "checkbox",
+                            checked: c.extendedContext.enabled === true,
+                            disabled: busy,
+                            onChange: (e: any) =>
+                              action("channels.setExtendedContext", {
+                                provider: c.id,
+                                enabled: e.target.checked,
+                              }),
+                          }),
+                          h("span", null, "大窗口档"),
+                        ),
                       h(
                         "div",
                         { className: "chub-chanacts" },
@@ -1923,9 +1955,23 @@ window.__ModuleLoader__.load({
                                       const rate = rateLabel(m);
                                       const note = promotionNote(m);
                                       const window = promotionWindow(m);
+                                      /**
+                                       * 上下文档位徽标。
+                                       *
+                                       * ⚠️ 只有**目录确实声明了更大一档**时才
+                                       * 出现（`maxContextWindow > contextWindow`），
+                                       * 且用 `active` 区分「已启用 / 未启用」——
+                                       * 混在一起会让用户分不清「模型不支持」
+                                       * 与「我没开」。
+                                       */
+                                      const tier = extendedTierBadge(
+                                        m,
+                                        c.extendedContext?.enabled === true,
+                                      );
                                       const tip = [
                                         m.id,
                                         rate ? "计费系数 " + rate : "",
+                                        tier ? tier.title : "",
                                         note
                                           ? "活动 " +
                                             note +
@@ -1984,6 +2030,17 @@ window.__ModuleLoader__.load({
                                               title: "计费系数 " + rate,
                                             },
                                             rate,
+                                          ),
+                                        tier &&
+                                          h(
+                                            "span",
+                                            {
+                                              className:
+                                                "chub-tier" +
+                                                (tier.active ? " on" : ""),
+                                              title: tier.title,
+                                            },
+                                            tier.label,
                                           ),
                                       );
                                     }),

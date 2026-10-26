@@ -2286,12 +2286,83 @@ async function authorizationLink(loginUrl, open = openSystemBrowser) {
 }
 
 // src/core/rate.ts
-function withinValidity(promo, now) {
-  const from = promo.validFrom === void 0 ? Number.NaN : Date.parse(promo.validFrom);
-  const until = promo.validUntil === void 0 ? Number.NaN : Date.parse(promo.validUntil);
+var DEFAULT_PROMO_TIMEZONE = "Asia/Shanghai";
+function minutesOf(value) {
+  if (typeof value !== "string") return void 0;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+  if (m === null) return void 0;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  return h < 24 && min < 60 ? h * 60 + min : void 0;
+}
+function slotMinutes(value) {
+  const fromClock = minutesOf(value);
+  if (fromClock !== void 0) return fromClock;
+  if (typeof value !== "number" || !Number.isFinite(value)) return void 0;
+  const n = Math.trunc(value);
+  return n >= 0 && n <= 1440 ? n : void 0;
+}
+function localClock(now, timezone) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      hour: "2-digit",
+      minute: "2-digit",
+      weekday: "short",
+      hour12: false
+    }).formatToParts(now);
+    const pick = (type) => parts.find((p) => p.type === type)?.value;
+    const hour = Number(pick("hour"));
+    const minute = Number(pick("minute"));
+    if (!Number.isFinite(hour) || !Number.isFinite(minute)) return void 0;
+    const weekdays = {
+      Mon: 1,
+      Tue: 2,
+      Wed: 3,
+      Thu: 4,
+      Fri: 5,
+      Sat: 6,
+      Sun: 7
+    };
+    const weekday = weekdays[String(pick("weekday"))];
+    if (weekday === void 0) return void 0;
+    return { minutes: hour % 24 * 60 + minute, weekday };
+  } catch {
+    return void 0;
+  }
+}
+function withinValidity(discount2, now) {
+  const from = discount2.validFrom === void 0 ? Number.NaN : Date.parse(discount2.validFrom);
+  const until = discount2.validUntil === void 0 ? Number.NaN : Date.parse(discount2.validUntil);
   if (Number.isFinite(from) && now.getTime() < from) return false;
   if (Number.isFinite(until) && now.getTime() >= until) return false;
   return true;
+}
+function withinDaily(discount2, now) {
+  const slots = discount2.daily;
+  if (!Array.isArray(slots) || slots.length === 0) return true;
+  const clock = localClock(now, discount2.timezone ?? DEFAULT_PROMO_TIMEZONE);
+  if (clock === void 0) return false;
+  for (const slot of slots) {
+    if (typeof slot !== "object" || slot === null) continue;
+    const start = slotMinutes(slot.start);
+    const end = slotMinutes(slot.end);
+    if (start === void 0 || end === void 0 || start === end) continue;
+    const days = slot.weekdays;
+    const dayMatches = days === void 0 || days.length === 0 || days.includes(clock.weekday);
+    if (start < end) {
+      if (dayMatches && clock.minutes >= start && clock.minutes < end) return true;
+      continue;
+    }
+    if (dayMatches && clock.minutes >= start) return true;
+    const previous = clock.weekday === 1 ? 7 : clock.weekday - 1;
+    const previousMatches = days === void 0 || days.length === 0 || days.includes(previous);
+    if (previousMatches && clock.minutes < end) return true;
+  }
+  return false;
+}
+function isActive(discount2, now = /* @__PURE__ */ new Date()) {
+  return withinValidity(discount2, now) && withinDaily(discount2, now);
 }
 function numberText(value) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
@@ -2303,24 +2374,10 @@ function text(value) {
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : void 0;
 }
-function buddyPromotion(model) {
-  const raw = model.promotion;
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return void 0;
-  const record = raw;
-  const daily = Array.isArray(record.daily) ? record.daily : void 0;
-  const label = text(record.label);
-  const rate = text(record.rate);
-  const validFrom = text(record.validFrom);
-  const validUntil = text(record.validUntil);
-  if (daily === void 0 && label === void 0 && rate === void 0) return void 0;
-  return {
-    daily,
-    timezone: text(record.timezone),
-    label,
-    rate,
-    validFrom,
-    validUntil
-  };
+function rateOf(value) {
+  const n = numberText(value);
+  if (n === void 0) return void 0;
+  return Number(n) === 0 ? "\u514D\u8D39" : "x" + n;
 }
 function promoRateText(rate) {
   if (rate === void 0) return void 0;
@@ -2328,34 +2385,158 @@ function promoRateText(rate) {
   const numeric = Number(rate.replace(/^x/, ""));
   return Number.isFinite(numeric) && numeric === 0 ? "\u514D\u8D39" : rate;
 }
+function discount(before, after, rest) {
+  const beforeNumber = typeof before === "number" && Number.isFinite(before) && before >= 0 ? before : void 0;
+  const afterNumber = typeof after === "number" && Number.isFinite(after) && after >= 0 ? after : void 0;
+  if (beforeNumber === void 0 || afterNumber === void 0) return void 0;
+  if (beforeNumber <= afterNumber) return void 0;
+  return { before: beforeNumber, after: afterNumber, ...rest };
+}
+function qoderDiscount(model) {
+  const raw = model.promotion;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return void 0;
+  const record = raw;
+  const start = text(record.windowStart);
+  const end = text(record.windowEnd);
+  const before = typeof record.beforePromotionPriceFactor === "number" ? record.beforePromotionPriceFactor : void 0;
+  const factor = typeof record.discountFactor === "number" ? record.discountFactor : void 0;
+  const after = before !== void 0 && factor !== void 0 ? before * factor : void 0;
+  return discount(before, after, {
+    ...start !== void 0 && end !== void 0 ? { daily: [{ start, end }] } : {},
+    ...text(record.badgeZh) === void 0 ? {} : { label: text(record.badgeZh) }
+  });
+}
+function buddyDiscount(model) {
+  const raw = model.promotion;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return void 0;
+  const record = raw;
+  const daily = Array.isArray(record.daily) ? record.daily : void 0;
+  const label = text(record.label);
+  const afterText = promoRateText(text(record.rate));
+  const validFrom = text(record.validFrom);
+  const validUntil = text(record.validUntil);
+  if (daily === void 0 && label === void 0 && afterText === void 0) return void 0;
+  return {
+    ...daily === void 0 ? {} : { daily },
+    ...text(record.timezone) === void 0 ? {} : { timezone: text(record.timezone) },
+    ...label === void 0 ? {} : { label },
+    ...afterText === void 0 ? {} : { afterText },
+    ...validFrom === void 0 ? {} : { validFrom },
+    ...validUntil === void 0 ? {} : { validUntil }
+  };
+}
+function traeDiscount(model) {
+  const raw = model.offPeak;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return void 0;
+  const record = raw;
+  const windows = Array.isArray(record.windows) ? record.windows : void 0;
+  if (windows === void 0 || windows.length === 0) return void 0;
+  const before = typeof record.beforeRate === "number" ? record.beforeRate : void 0;
+  const after = typeof record.afterRate === "number" ? record.afterRate : void 0;
+  const daily = [];
+  for (const window of windows) {
+    if (typeof window !== "object" || window === null) continue;
+    const item = window;
+    const start = item.startMinute;
+    const end = item.endMinute;
+    if (typeof start !== "number" || typeof end !== "number") continue;
+    const rawDays = item.weekdays;
+    const weekdays = Array.isArray(rawDays) ? rawDays.filter(
+      (day) => typeof day === "number" && Number.isInteger(day) && day >= 1 && day <= 7
+    ) : void 0;
+    daily.push({
+      start,
+      end,
+      ...weekdays === void 0 || weekdays.length === 0 ? {} : { weekdays }
+    });
+  }
+  if (daily.length === 0) return void 0;
+  const timezone = text(record.timezone);
+  return discount(before, after, {
+    daily,
+    ...timezone === void 0 ? {} : { timezone }
+  });
+}
+function discountOf(model) {
+  if (!model) return void 0;
+  const trae = traeDiscount(model);
+  if (trae !== void 0) return trae;
+  const qoder = qoderDiscount(model);
+  if (qoder !== void 0) return qoder;
+  const buddy = buddyDiscount(model);
+  if (buddy !== void 0) {
+    const before = typeof model.creditsRate === "string" ? Number(model.creditsRate.replace(/^x/, "")) : typeof model.creditsRate === "number" ? model.creditsRate : void 0;
+    const after = buddy.afterText === "\u514D\u8D39" ? 0 : buddy.afterText === void 0 ? void 0 : Number(buddy.afterText.replace(/^x/, ""));
+    if (before !== void 0 && after !== void 0 && Number.isFinite(before) && Number.isFinite(after)) {
+      if (before > after) return { ...buddy, before, after };
+      return void 0;
+    }
+    return buddy;
+  }
+  const original = typeof model.originalCreditsRate === "number" ? model.originalCreditsRate : void 0;
+  const current = typeof model.creditsRate === "number" ? model.creditsRate : void 0;
+  if (original !== void 0 && current !== void 0 && original > current) {
+    const endsAt = typeof model.discountEndsAtSec === "number" ? model.discountEndsAtSec : void 0;
+    return {
+      before: original,
+      after: current,
+      ...endsAt === void 0 ? {} : { validUntil: new Date(endsAt * 1e3).toISOString() }
+    };
+  }
+  return void 0;
+}
 function rateLabel(model, now = /* @__PURE__ */ new Date()) {
   if (!model) return void 0;
+  const found = discountOf(model);
+  if (found !== void 0) {
+    const beforeText = rateOf(found.before);
+    const afterText = rateOf(found.after) ?? found.afterText;
+    if (beforeText !== void 0) {
+      if (afterText !== void 0 && isActive(found, now)) {
+        return beforeText + "\u2192" + afterText;
+      }
+      return beforeText;
+    }
+  }
   const price = numberText(model.priceFactor);
   if (price !== void 0) return price + "\xD7";
   const creditsText = text(model.creditsRate);
-  if (creditsText !== void 0) {
-    const promo = buddyPromotion(model);
-    const promoRate = promo !== void 0 && withinValidity(promo, now) ? promoRateText(promo.rate) : void 0;
-    const discounted = promoRate ?? text(model.discountedCreditsRate);
-    if (discounted === void 0 || discounted === creditsText) return creditsText;
-    return creditsText + "\u2192" + discounted;
-  }
+  if (creditsText !== void 0) return creditsText;
   const credits = numberText(model.creditsRate);
-  if (credits !== void 0) {
-    const current = credits === "0" ? "\u514D\u8D39" : "x" + credits;
-    const original = numberText(model.originalCreditsRate);
-    if (original !== void 0 && Number(original) > Number(credits))
-      return "x" + original + "\u2192" + current;
-    return current;
-  }
+  if (credits !== void 0) return rateOf(Number(credits));
   const effective = numberText(model.effectiveMultiplier);
-  if (effective !== void 0) {
-    const base = numberText(model.baseMultiplier);
-    if (base !== void 0 && Number(base) > Number(effective))
-      return "x" + base + "\u2192x" + effective;
-    return "x" + effective;
-  }
+  if (effective !== void 0) return "x" + effective;
   return void 0;
+}
+
+// src/core/context.ts
+function tokenText(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0)
+    return void 0;
+  const n = Math.trunc(value);
+  if (n % 1e6 === 0) return n / 1e6 + "M";
+  if (n % 1048576 === 0) return n / 1048576 + "M";
+  if (n % 1e3 === 0) return n / 1e3 + "K";
+  if (n % 1024 === 0) return n / 1024 + "K";
+  return String(n);
+}
+function contextTier(model) {
+  if (!model) return void 0;
+  const positive2 = (v) => typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.trunc(v) : void 0;
+  const base = positive2(model.contextWindow);
+  const rawMax = positive2(model.maxContextWindow);
+  const extended = rawMax !== void 0 && (base === void 0 || rawMax > base) ? rawMax : void 0;
+  if (base === void 0 && extended === void 0) return void 0;
+  return {
+    ...base === void 0 ? {} : { base },
+    ...extended === void 0 ? {} : { extended }
+  };
+}
+function extendedTierLabel(model, extendedEnabled) {
+  if (!extendedEnabled) return void 0;
+  const tier = contextTier(model);
+  if (tier?.extended === void 0) return void 0;
+  return tokenText(tier.extended);
 }
 
 // src/core/promotion.ts
@@ -2387,9 +2568,9 @@ function promotionsFromConfig(body) {
     if (typeof item !== "object" || item === null) continue;
     const promotion = item;
     if (promotion.enabled === false) continue;
-    const discount = promotion.discount;
-    if (typeof discount !== "object" || discount === null) continue;
-    const detail = discount;
+    const discount2 = promotion.discount;
+    if (typeof discount2 !== "object" || discount2 === null) continue;
+    const detail = discount2;
     const schedule = typeof promotion.schedule === "object" && promotion.schedule !== null ? promotion.schedule : void 0;
     const daily = Array.isArray(schedule?.daily) ? schedule.daily : void 0;
     const timezone = text2(schedule?.timezone);
@@ -4153,7 +4334,22 @@ function parseModelInfo(m, seen) {
   const name2 = typeof rawName === "string" && rawName.length > 0 ? normalizeModelId(rawName) : id;
   if (seen.has(id)) return void 0;
   seen.add(id);
-  return { id, name: name2 };
+  const contextWindow = positiveInt(
+    m["context_window"] ?? m["contextWindow"] ?? m["max_input_tokens"] ?? m["maxInputTokens"]
+  );
+  const maxTokens = positiveInt(
+    m["max_tokens"] ?? m["maxTokens"] ?? m["max_output_tokens"] ?? m["maxOutputTokens"]
+  );
+  return {
+    id,
+    name: name2,
+    ...contextWindow === void 0 ? {} : { contextWindow },
+    ...maxTokens === void 0 ? {} : { maxTokens }
+  };
+}
+function positiveInt(value) {
+  const n = typeof value === "string" ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.trunc(n) : void 0;
 }
 function extractJsonArray(text3, path) {
   try {
@@ -5727,9 +5923,9 @@ var CodeArtsAdapter = class extends LlmAdapter {
     await this.ensureRemoteModels();
     const remoteModel = this.remoteModels?.find((m) => m.id === model);
     const name2 = remoteModel?.name ?? model;
-    const contextWindow = CONTEXT_WINDOWS.get(model);
+    const contextWindow = remoteModel?.contextWindow ?? CONTEXT_WINDOWS.get(model);
     const resolved = { provider, id: model, name: name2 };
-    if (contextWindow !== void 0) resolved.context = { contextWindow };
+    if (contextWindow !== void 0 && contextWindow > 0) resolved.context = { contextWindow };
     resolved.reasoning = {
       efforts: [
         { id: ReasoningEffortId("on"), name: "\u5F00\u542F" },
@@ -6658,9 +6854,9 @@ function parsePromotions(record, now = /* @__PURE__ */ new Date()) {
     const promotion = item;
     if (promotion.enabled === false) continue;
     if (!promotionActiveNow(promotion, now)) continue;
-    const discount = promotion.discount;
-    if (typeof discount !== "object" || discount === null) continue;
-    const detail = discount;
+    const discount2 = promotion.discount;
+    if (typeof discount2 !== "object" || discount2 === null) continue;
+    const detail = discount2;
     const factor = typeof detail.factor === "number" ? detail.factor : void 0;
     const rawSchedule = promotion.schedule;
     const windowed = typeof rawSchedule === "object" && rawSchedule !== null && hasTimeWindow(rawSchedule);
@@ -11836,12 +12032,12 @@ function promotionActiveNow2(promotion, now) {
 function qoderDisplayName(model, now = /* @__PURE__ */ new Date()) {
   const promo = model.promotion;
   const before = promo?.beforePromotionPriceFactor;
-  const discount = promo?.discountFactor;
-  const hasPromo = promo !== void 0 && before !== void 0 && discount !== void 0;
+  const discount2 = promo?.discountFactor;
+  const hasPromo = promo !== void 0 && before !== void 0 && discount2 !== void 0;
   const active = hasPromo && promotionActiveNow2(promo, now);
   if (model.priceFactor === 0) return `${model.name} \xB7 \u514D\u8D39`;
   if (hasPromo && active) {
-    const effective = Number((before * discount).toFixed(4));
+    const effective = Number((before * discount2).toFixed(4));
     return `${model.name} \xB7 x${before}\u2192x${effective}`;
   }
   const price = hasPromo ? before : model.priceFactor;
@@ -11927,9 +12123,7 @@ function isTruthyFlag(raw) {
   return value === "1" || value === "true" || value === "yes";
 }
 function resolveMaxModeFlag(raw) {
-  if (raw === void 0) return true;
-  const value = raw.trim().toLowerCase();
-  return !(value === "0" || value === "false" || value === "no" || value === "off");
+  return isTruthyFlag(raw);
 }
 function resolveMaxModeModels(raw) {
   if (raw === void 0) return void 0;
@@ -12276,9 +12470,9 @@ function readActivityDiscount(entry, nowSec = Math.floor(Date.now() / 1e3)) {
   if (typeof raw !== "string" || raw.length === 0) return void 0;
   const config = parseJsonObject(raw);
   if (config === void 0) return void 0;
-  const discount = config.activity_discount ?? config.ActivityDiscount;
-  if (typeof discount !== "object" || discount === null) return void 0;
-  const discountRecord = discount;
+  const discount2 = config.activity_discount ?? config.ActivityDiscount;
+  if (typeof discount2 !== "object" || discount2 === null) return void 0;
+  const discountRecord = discount2;
   if (readBooleanField(discountRecord, "enable") === false) return void 0;
   const data = discountRecord.data ?? discountRecord.Data;
   if (typeof data !== "object" || data === null) return void 0;
@@ -12288,6 +12482,9 @@ function readActivityDiscount(entry, nowSec = Math.floor(Date.now() / 1e3)) {
   const currentRecord = current;
   const type = (readStringField2(currentRecord, "discount_type") || readStringField2(currentRecord, "discountType")).trim().toLowerCase();
   if (type.length === 0 || type === "none") return void 0;
+  if (type === "off_peak" || type === "offpeak") {
+    if (readOffPeakDiscount(entry) !== void 0) return void 0;
+  }
   const before = readNumberField2(currentRecord, "before_consumption_rate") ?? readNumberField2(currentRecord, "beforeConsumptionRate");
   const after = readNumberField2(currentRecord, "consumption_rate") ?? readNumberField2(currentRecord, "consumptionRate");
   if (before === void 0 || before <= 0) return void 0;
@@ -12303,6 +12500,57 @@ function readActivityDiscount(entry, nowSec = Math.floor(Date.now() / 1e3)) {
   }
   if (endsAtSec !== void 0 && endsAtSec <= nowSec) return void 0;
   return endsAtSec === void 0 ? { originalRate: before } : { originalRate: before, endsAtSec };
+}
+function readOffPeakDiscount(entry) {
+  const raw = entry.display_contact_config ?? entry.DisplayContactConfig;
+  if (typeof raw !== "string" || raw.length === 0) return void 0;
+  const config = parseJsonObject(raw);
+  if (config === void 0) return void 0;
+  const discount2 = config.activity_discount ?? config.ActivityDiscount;
+  if (typeof discount2 !== "object" || discount2 === null) return void 0;
+  const discountRecord = discount2;
+  if (readBooleanField(discountRecord, "enable") === false) return void 0;
+  const data = discountRecord.data ?? discountRecord.Data;
+  if (typeof data !== "object" || data === null) return void 0;
+  const dataRecord = data;
+  for (const [key, value] of Object.entries(dataRecord)) {
+    if (key === "current" || key === "Current") continue;
+    if (typeof value !== "object" || value === null) continue;
+    const record = value;
+    const windowsRaw = record.time_windows ?? record.timeWindows;
+    if (!Array.isArray(windowsRaw) || windowsRaw.length === 0) continue;
+    const before = readNumberField2(record, "before_consumption_rate") ?? readNumberField2(record, "beforeConsumptionRate");
+    const after = readNumberField2(record, "after_consumption_rate") ?? readNumberField2(record, "afterConsumptionRate");
+    if (before === void 0 || before <= 0) continue;
+    if (after === void 0 || after < 0 || before <= after) continue;
+    const windows = [];
+    for (const item of windowsRaw) {
+      if (typeof item !== "object" || item === null) continue;
+      const w = item;
+      const start = readNumberField2(w, "start_minute") ?? readNumberField2(w, "startMinute");
+      const end = readNumberField2(w, "end_minute") ?? readNumberField2(w, "endMinute");
+      if (start === void 0 || end === void 0) continue;
+      if (start < 0 || start > 1440 || end < 0 || end > 1440 || start === end) continue;
+      const weekdaysRaw = w.weekdays ?? w.weekDays;
+      const weekdays = Array.isArray(weekdaysRaw) ? weekdaysRaw.filter(
+        (day) => typeof day === "number" && Number.isInteger(day) && day >= 1 && day <= 7
+      ) : void 0;
+      windows.push({
+        ...weekdays === void 0 || weekdays.length === 0 ? {} : { weekdays },
+        startMinute: Math.trunc(start),
+        endMinute: Math.trunc(end)
+      });
+    }
+    if (windows.length === 0) continue;
+    const timezone = readStringField2(record, "time_zone") || readStringField2(record, "timeZone");
+    return {
+      beforeRate: before,
+      afterRate: after,
+      windows,
+      ...timezone.length > 0 ? { timezone } : {}
+    };
+  }
+  return void 0;
 }
 function parseJsonObject(raw) {
   try {
@@ -12332,7 +12580,8 @@ function parseTraeConfigEntry(entry, channel) {
   const toolResponseMultimodal = displayRecord === void 0 ? void 0 : readBooleanField(displayRecord, "tool_response_multimodal") ?? readBooleanField(displayRecord, "ToolResponseMultimodal");
   const reasoningConfig = readReasoningEffortConfig(entry);
   const creditsRate = readConsumptionRate(entry);
-  const discount = readActivityDiscount(entry);
+  const discount2 = readActivityDiscount(entry);
+  const offPeak = readOffPeakDiscount(entry);
   return {
     id,
     name: name2,
@@ -12350,8 +12599,9 @@ function parseTraeConfigEntry(entry, channel) {
     ...contextWindow === void 0 ? {} : { contextWindow },
     ...maxOutputTokens === void 0 ? {} : { maxOutputTokens },
     ...creditsRate === void 0 ? {} : { creditsRate },
-    ...discount === void 0 ? {} : { originalCreditsRate: discount.originalRate },
-    ...discount?.endsAtSec === void 0 ? {} : { discountEndsAtSec: discount.endsAtSec }
+    ...discount2 === void 0 ? {} : { originalCreditsRate: discount2.originalRate },
+    ...discount2?.endsAtSec === void 0 ? {} : { discountEndsAtSec: discount2.endsAtSec },
+    ...offPeak === void 0 ? {} : { offPeak }
   };
 }
 function parseTraeBatchModelList(body, channelPriority = TRAE_CHANNELS) {
@@ -12446,12 +12696,11 @@ function readBooleanField(source, key) {
 }
 var TRAE_DEFAULT_MODEL = "glm-5.2";
 var TRAE_FUNCTION = "solo_work_lite";
-var TRAE_MAX_CONTEXT_TOKENS = 1e6;
 var TRAE_MAX_PROMPT_TOKENS = 936e3;
 var TRAE_MAX_OUTPUT_TOKENS = 64e3;
 var TRAE_MAX_MODE_TYPE = 1;
 function traeMaxModeFields(maxContext, outputMax) {
-  const context = maxContext > 0 ? maxContext : TRAE_MAX_CONTEXT_TOKENS;
+  if (!Number.isFinite(maxContext) || maxContext <= 0) return void 0;
   return {
     model_auto_selection: {
       strategy: "max",
@@ -12460,7 +12709,7 @@ function traeMaxModeFields(maxContext, outputMax) {
     },
     model_selection_strategy: "max",
     mode_type: TRAE_MAX_MODE_TYPE,
-    context_window_size: context,
+    context_window_size: maxContext,
     prompt_max_tokens: TRAE_MAX_PROMPT_TOKENS,
     max_tokens: outputMax !== void 0 && outputMax > 0 ? outputMax : TRAE_MAX_OUTPUT_TOKENS
   };
@@ -13944,34 +14193,64 @@ var TraeAdapter = class extends LlmAdapter4 {
    * ⚠️ 开启 Max 模式时改用 `context_window_tokens.max`（1M）。两者**不能混用**：
    * 未开 Max 却声明 1M 会让 DSH 把超长上下文直接发出去，而上游按 200K 校验后
    * 拒绝（输入被截断或 4xx）。
+   *
+   * ⚠️ **不再用 `TRAE_MAX_CONTEXT_TOKENS` 补位**（2026-10-24 修正）：
+   * `maxModeFor` 已要求远端同时下发 `context_window_tokens.max`，故走到这里时
+   * `maxContextWindow` 必然有值。此前那个 `?? 1_000_000` 会给
+   * 「只标了 `max_mode`、没给窗口」的模型（实测 `kimi-k2.6`：`maxMode=true`、
+   * 无 `maxContextWindow`、dev 仅 116000）**凭空声明 1M** —— DSH 会据此把
+   * 远超上游校验线的上下文发出去，压缩点也被推到 80 万 token。
    */
   contextWindowFor(model) {
     const meta = this.remoteMeta.get(model);
-    if (this.maxModeFor(model)) {
-      return meta?.maxContextWindow ?? TRAE_MAX_CONTEXT_TOKENS;
-    }
+    if (this.maxModeFor(model)) return meta?.maxContextWindow;
     return meta?.contextWindow ?? this.fallbackIndex.get(model)?.contextWindow;
   }
   /**
    * 该模型本次是否启用 **Max 模式**（1M 上下文）。
    *
-   * 三个条件缺一不可（对齐 `Trae2api-cn/trae_remote_client.py:249-277`）：
-   * 1. 产品级开关（`DSH_TRAE_MAX_MODE`）未关 —— **默认开启**，用户要求
-   *    「上下文用最大的那一档」；显式设 `0` / `false` 才关回 200K；
+   * 四个条件缺一不可（对齐 `Trae2api-cn/trae_remote_client.py:249-277`）：
+   * 1. 产品级开关（`DSH_TRAE_MAX_MODE`，渠道中心可切换）**显式开启** ——
+   *    默认**关闭**（2026-10-24 修正，见 `trae-product.ts` 的说明）；
    * 2. 远端 `display_config.max_mode === true` —— **绝不**给未标记的模型硬套
    *    Max 参数，上游会拒绝（`_max_mode_requested` 的注释明写
    *    "Never fabricate max limits for a model the account config does not mark"）；
-   * 3. 若配置了白名单，模型须在其中。
+   * 3. 远端确实下发了 `context_window_tokens.max` —— 只标了开关、没给窗口时
+   *    **不进 Max 档**（否则等于替上游编造窗口，见 `contextWindowFor`）；
+   * 4. 若配置了白名单，模型须在其中。
    */
   maxModeFor(model) {
     if (this.product.maxMode !== true) return false;
     const meta = this.remoteMeta.get(model);
     if (meta === void 0 || meta.maxMode !== true) return false;
+    if (meta.maxContextWindow === void 0 || meta.maxContextWindow <= 0) return false;
     const whitelist = this.product.maxModeModels;
     if (whitelist !== void 0 && whitelist.length > 0 && !whitelist.includes("*")) {
       return whitelist.includes(model);
     }
     return true;
+  }
+  /**
+   * 该模型**是否有 Max 档**（能力，与是否启用无关）。
+   *
+   * 供展示层标注「Max 1M」：只认远端「开关 + 窗口」两个事实同时成立，
+   * 与 {@link maxModeFor} 的准入判据同源，避免界面承诺一个发不出去的档位。
+   */
+  maxTierFor(model) {
+    const meta = this.remoteMeta.get(model);
+    if (meta === void 0 || meta.maxMode !== true) return void 0;
+    const window = meta.maxContextWindow;
+    if (window === void 0 || window <= 0) return void 0;
+    if (meta.contextWindow !== void 0 && window <= meta.contextWindow) return void 0;
+    return { contextWindow: window };
+  }
+  /** 当前是否启用 Max 档（渠道中心的开关读它）。 */
+  get maxModeEnabled() {
+    return this.product.maxMode === true;
+  }
+  /** 运行时切换 Max 档开关（持久化由接线侧负责）。 */
+  setMaxModeEnabled(enabled) {
+    this.product.maxMode = enabled === true;
   }
   /**
    * 模型可选的推理强度档位（`reasoning_effort_config`）。
@@ -14155,13 +14434,11 @@ var TraeAdapter = class extends LlmAdapter4 {
     }
     if (this.maxModeFor(options.model)) {
       const meta = this.remoteMeta.get(options.model);
-      Object.assign(
-        openaiBody,
-        traeMaxModeFields(
-          meta?.maxContextWindow ?? TRAE_MAX_CONTEXT_TOKENS,
-          meta?.maxModeOutputTokens
-        )
+      const maxFields = traeMaxModeFields(
+        meta?.maxContextWindow ?? 0,
+        meta?.maxModeOutputTokens
       );
+      if (maxFields !== void 0) Object.assign(openaiBody, maxFields);
     }
     if (options.system !== void 0 && options.system.length > 0) {
       openaiBody.messages = [
@@ -18558,6 +18835,9 @@ var GEMINI_FALLBACK_MODELS = [
     defaultEffort: GEMINI_DEFAULT_EFFORT
   }
 ];
+function geminiFallbackEntries() {
+  return GEMINI_FALLBACK_MODELS;
+}
 function geminiEffortToTier(effort) {
   if (effort === "low" || effort === "medium" || effort === "high" || effort === "tiered") {
     return effort;
@@ -19885,16 +20165,18 @@ var GeminiAdapter = class extends LlmAdapter7 {
   }
   async resolveModel(provider, model, _signal) {
     const entry = this.loadModels().find((item) => item.id === model);
+    const fallback = entry?.contextWindow !== void 0 && entry.contextWindow > 0 ? void 0 : geminiFallbackEntries().find((item) => item.id === model);
     const resolved = {
       provider,
       id: model,
-      name: entry?.name ?? model,
+      name: entry?.name ?? fallback?.name ?? model,
       inputModalities: this.inputModalitiesFor(entry)
     };
-    if (entry !== void 0 && entry.contextWindow > 0) {
-      resolved.context = { contextWindow: entry.contextWindow };
+    const contextWindow = entry?.contextWindow ?? fallback?.contextWindow;
+    if (contextWindow !== void 0 && contextWindow > 0) {
+      resolved.context = { contextWindow };
     }
-    const maxTokens = entry?.maxTokens;
+    const maxTokens = entry?.maxTokens ?? fallback?.maxTokens;
     if (maxTokens !== void 0 && Number.isSafeInteger(maxTokens) && maxTokens > 0) {
       resolved.defaultMaxTokens = maxTokens;
     }
@@ -22249,13 +22531,16 @@ async function createDrivers(ctx, { catalog, observer, store }) {
           for (const m of (await catalog.load(id + ":" + a.id)).models)
             models.set(m.id, m);
         const hidden = pool.disabledModelsFor(id);
+        const extended = id === "trae" && product.maxMode === true;
         return [...models.values()].filter((m) => !hidden.has(m.id)).map((m) => {
           const rate = rateLabel(m);
+          const tier = extendedTierLabel(m, extended);
+          const decorated = (rate === void 0 ? m.name : m.name + " \xB7 " + rate) + (tier === void 0 ? "" : " \xB7 " + tier);
           return {
             ...m,
             inputModalities: m.supportsImage === true || m.supportsImages === true ? ["text", "image"] : ["text"],
             provider: "channel-hub/" + id,
-            name: rate === void 0 ? m.name : m.name + " \xB7 " + rate
+            name: decorated
           };
         });
       };
@@ -22370,6 +22655,31 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         claim,
         renew: renewAccount,
         discover,
+        /**
+         * 该渠道是否支持「大窗口档」（目前只有 Trae 的 Max 1M 档）。
+         *
+         * ⚠️ **能力与开关分开**：`supported` 只看适配器有没有这个档位概念，
+         * `enabled` 是用户此刻的选择。把两者合成一个布尔会让界面无法回答
+         * 「为什么我看不到 1M」——是模型不支持，还是我没开。
+         */
+        extendedContext: {
+          supported: id === "trae",
+          enabled: () => product.maxMode === true,
+          /**
+           * 切换大窗口档。
+           *
+           * ⚠️ 只改 `product.maxMode` 就够：适配器在每次 `resolveModel` /
+           * `stream` 时现读 `this.product.maxMode`（见 `TraeAdapter.maxModeFor`），
+           * 且 `options.product` 与这里持有的是**同一个对象**。故不需要重建
+           * 适配器 —— 重建会顺带丢掉远端目录缓存。
+           */
+          set: async (enabled) => {
+            if (id !== "trae") throw Error("\u8BE5\u6E20\u9053\u6CA1\u6709\u5927\u7A97\u53E3\u6863");
+            product.maxMode = enabled === true;
+            await store.call("set", "extended-context:" + id, enabled === true);
+            ctx.emit("llm/adapters-updated");
+          }
+        },
         // 停止时落盘签名缓存（`undefined` 的渠道直接跳过）。
         flush: sigStore === void 0 ? void 0 : () => sigStore.flush()
       });
@@ -22479,6 +22789,23 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         await Promise.allSettled([...pending.values()].filter((p) => p.status === "pending").map((p) => p.completion));
     },
     read,
+    /**
+     * 恢复持久化的渠道级设置（目前只有 Trae 的大窗口档开关）。
+     *
+     * ⚠️ **必须在 `hydrate()` 之前完成**：`resolveModel` 的档位与 `visible()`
+     * 的名字后缀都读 `product.maxMode`，晚一步会让首屏按默认值渲染一遍
+     * （用户会看到名字里没有 `1M`、随后才跳变）。
+     *
+     * 读不到键时保持产品默认（`DSH_TRAE_MAX_MODE` 环境变量，缺省关闭）——
+     * 不把「没有记录」当成「用户关掉了」，否则环境变量会被静默覆盖。
+     */
+    async restore() {
+      const saved = await store.call("get", "extended-context:trae");
+      if (typeof saved === "boolean") {
+        const driver = drivers.get("trae");
+        if (driver?.product) driver.product.maxMode = saved;
+      }
+    },
     async hydrate() {
       for (const d of drivers.values()) await d.hydrate?.();
     },
@@ -22576,6 +22903,7 @@ async function apply(ctx) {
   const reload = async () => Promise.allSettled(
     [...engine.drivers.values()].filter((d) => d.reload).map((d) => d.reload())
   );
+  await engine.restore();
   await engine.hydrate();
   const orphans = orphanAccounts(
     await engine.pool.listAllAccounts(),
@@ -22608,6 +22936,19 @@ async function apply(ctx) {
           canBalance: !!d.balance,
           canLogin: true,
           selectedAccountId: await engine.selection.get(d.id),
+          /**
+           * 大窗口档（目前只有 Trae 的 Max 1M）。
+           *
+           * ⚠️ 只对有该能力的渠道下发 `supported: true`：其余渠道的
+           * `extendedContext` 是 undefined，界面据此不渲染开关，而不是渲染一个
+           * 点了报错的按钮。
+           */
+          ...d.extendedContext?.supported ? {
+            extendedContext: {
+              supported: true,
+              enabled: d.extendedContext.enabled()
+            }
+          } : {},
           accounts: await Promise.all(
             accounts.filter((a) => a.provider === d.id).map(async (a) => {
               const balance = await store.call("get", "balance:" + a.id);
@@ -22641,6 +22982,15 @@ async function apply(ctx) {
         throw Error("Invalid account selection");
       await engine.selection.set(p.provider, p.accountId);
       await engine.drivers.get(p.provider)?.hydrate?.();
+      ctx.emit("llm/adapters-updated");
+      return true;
+    }
+    if (method === "channels.setExtendedContext") {
+      const d = engine.drivers.get(String(p.provider));
+      if (!d?.extendedContext?.supported) throw Error("\u8BE5\u6E20\u9053\u6CA1\u6709\u5927\u7A97\u53E3\u6863");
+      if (typeof p.enabled !== "boolean")
+        throw Error("enabled must be boolean");
+      await d.extendedContext.set(p.enabled);
       ctx.emit("llm/adapters-updated");
       return true;
     }

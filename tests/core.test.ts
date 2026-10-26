@@ -470,16 +470,13 @@ test("rate labels cover Qoder, Buddy and Trae without inventing values", () => {
   assert.equal(rateLabel({ priceFactor: 0 }), "0×");
   assert.equal(rateLabel({ priceFactor: 0.5 }), "0.5×");
   assert.equal(rateLabel({ creditsRate: "x0.29" }), "x0.29");
-  assert.equal(
-    rateLabel({ creditsRate: "x0.17", discountedCreditsRate: "x0.50" }),
-    "x0.17→x0.50",
-  );
-  assert.equal(
-    rateLabel({ creditsRate: "x0.00", discountedCreditsRate: "免费" }),
-    "x0.00→免费",
-  );
   assert.equal(rateLabel({ creditsRate: 0.78 }), "x0.78");
   assert.equal(rateLabel({ creditsRate: 0 }), "免费");
+  assert.equal(rateLabel({}), undefined);
+  assert.equal(rateLabel({ creditsRate: "" }), undefined);
+  assert.equal(rateLabel({ priceFactor: Number.NaN }), undefined);
+
+  // 无窗口的折扣（一次性活动）按「现在生效」处理，仍展开箭头。
   assert.equal(
     rateLabel({ creditsRate: 0.08, originalCreditsRate: 0.8 }),
     "x0.8→x0.08",
@@ -488,12 +485,38 @@ test("rate labels cover Qoder, Buddy and Trae without inventing values", () => {
     rateLabel({ creditsRate: 0, originalCreditsRate: 0.1 }),
     "x0.1→免费",
   );
-  assert.equal(rateLabel({}), undefined);
-  assert.equal(rateLabel({ creditsRate: "" }), undefined);
-  assert.equal(rateLabel({ priceFactor: Number.NaN }), undefined);
+
+  /**
+   * 有每日时段的折扣**按窗口推算**（2026-10-24 统一口径）。
+   *
+   * 旧实现只看 `discountedCreditsRate`，于是中午也显示夜间价 ——
+   * 用户按折后价预期、实际按原价计费。
+   */
+  const nightly = {
+    creditsRate: "x0.79",
+    discountedCreditsRate: "x0.50",
+    promotion: {
+      daily: [{ start: "23:00", end: "7:50" }],
+      timezone: "Asia/Shanghai",
+      label: "夜间折扣",
+      rate: "x0.50",
+    },
+  };
+  // 12:00 不在窗口内 ⇒ 只报原价。
+  assert.equal(rateLabel(nightly, new Date("2026-10-24T12:00:00+08:00")), "x0.79");
+  // 01:00 在窗口内 ⇒ 展开折后价（数值归一化会去掉尾零：x0.50 → x0.5）。
+  assert.equal(rateLabel(nightly, new Date("2026-10-24T01:00:00+08:00")), "x0.79→x0.5");
 });
 
-test("promotion notes describe the window while rates stay as the catalog states them", () => {
+test("promotion notes describe the window and rates follow the window (unified rule)", () => {
+  /**
+   * 2026-10-24 统一口径：**所有渠道**的时段折扣都按窗口推算。
+   *
+   * 旧实现把「何时生效」分散在三处各写一遍，于是同一缺陷出现三次：
+   * Trae 只读抓取快照（窗口外抓 ⇒ 折扣消失）、Buddy 只校验有效期
+   * （中午显示夜间价）、Qoder 直接显示抓取那一刻的 `price_factor`。
+   * 现在只有 `isActive()` 一条判据。
+   */
   const night = {
     creditsRate: "x0.29",
     discountedCreditsRate: "免费",
@@ -504,12 +527,15 @@ test("promotion notes describe the window while rates stay as the catalog states
       rate: "免费",
     },
   };
-  // 倍率不按窗口推算：白天夜里都是同一个值，不随读取时刻跳变。
-  assert.equal(rateLabel(night, new Date("2026-10-20T15:00:00Z")), "x0.29→免费");
-  assert.equal(rateLabel(night, new Date("2026-10-20T04:00:00Z")), "x0.29→免费");
-  // 活动标签才是「什么时候生效」的载体，白天也要看得到。
-  assert.equal(promotionNote(night), "夜间折扣 23:00–07:50");
-  assert.equal(promotionWindow(night), "23:00–07:50");
+  // 12:00 不在窗口内 ⇒ 只报原价。
+  assert.equal(rateLabel(night, new Date("2026-10-24T12:00:00+08:00")), "x0.29");
+  // 01:00 在窗口内 ⇒ 展开折后价。
+  assert.equal(rateLabel(night, new Date("2026-10-24T01:00:00+08:00")), "x0.29→免费");
+  // 活动标签白天也要看得到，但要标明「未生效」。
+  assert.equal(promotionNote(night, new Date("2026-10-24T12:00:00+08:00")), "夜间折扣（未生效）");
+  assert.equal(promotionNote(night, new Date("2026-10-24T01:00:00+08:00")), "夜间折扣");
+  // 时段文案与是否生效无关。
+  assert.equal(promotionWindow(night), "23:00–次日07:50");
 
   // 实机形态：白天抓目录时 OFM 已把折后价丢掉（无 discountedCreditsRate），
   // 只剩本插件补的 promotion —— 折扣仍要从 promotion.rate 取到。
@@ -522,11 +548,18 @@ test("promotion notes describe the window while rates stay as the catalog states
       rate: "免费",
     },
   };
-  assert.equal(rateLabel(onlyPromotion), "x0.29→免费");
-  assert.equal(promotionNote(onlyPromotion), "夜间免费 23:00–08:00");
-  assert.equal(promotionWindow(onlyPromotion), "23:00–08:00");
+  assert.equal(rateLabel(onlyPromotion, new Date("2026-10-24T01:00:00+08:00")), "x0.29→免费");
+  assert.equal(rateLabel(onlyPromotion, new Date("2026-10-24T12:00:00+08:00")), "x0.29");
+  assert.equal(promotionNote(onlyPromotion, new Date("2026-10-24T01:00:00+08:00")), "夜间免费");
+  assert.equal(promotionWindow(onlyPromotion), "23:00–次日08:00");
 
-  // Qoder 错峰折扣：倍率就是目录声明的 price_factor，角标单独给时段语义。
+  /**
+   * Qoder 错峰折扣：原价 × 折扣系数得到折后价（两者都是活动参数，
+   * 与抓取时刻无关），窗口外只报原价。
+   *
+   * ⚠️ 旧实现直接显示 `priceFactor`（抓取那一刻的生效价）——
+   * 窗口外抓目录会让折后价整天显示，窗口内抓则永远显示折后价。
+   */
   const qoder = {
     priceFactor: 0.2,
     promotion: {
@@ -538,38 +571,40 @@ test("promotion notes describe the window while rates stay as the catalog states
       badgeZh: "错峰 4 折",
     },
   };
-  assert.equal(rateLabel(qoder, new Date("2026-10-20T15:00:00Z")), "0.2×");
-  assert.equal(rateLabel(qoder, new Date("2026-10-20T04:00:00Z")), "0.2×");
-  assert.equal(promotionNote(qoder), "错峰 4 折");
+  // 12:00 不在 22:00–08:00 内 ⇒ 原价 0.5。
+  assert.equal(rateLabel(qoder, new Date("2026-10-24T12:00:00+08:00")), "x0.5");
+  // 03:00 在窗口内 ⇒ 0.5 × 0.4 = 0.2。
+  assert.equal(rateLabel(qoder, new Date("2026-10-24T03:00:00+08:00")), "x0.5→x0.2");
+  assert.equal(promotionNote(qoder, new Date("2026-10-24T12:00:00+08:00")), "错峰 4 折（未生效）");
+  assert.equal(promotionNote(qoder, new Date("2026-10-24T03:00:00+08:00")), "错峰 4 折");
 
   // 没有角标时用时段兜底，仍然给出「什么时候」。
-  assert.equal(
-    promotionNote({
-      creditsRate: "x0.79",
-      promotion: {
-        daily: [{ start: "23:00", end: "7:50" }],
-        timezone: "Asia/Shanghai",
-        rate: "x0.50",
-      },
-    }),
-    "23:00–07:50",
-  );
+  const noBadge = {
+    creditsRate: "x0.79",
+    promotion: {
+      daily: [{ start: "23:00", end: "7:50" }],
+      timezone: "Asia/Shanghai",
+      rate: "x0.50",
+    },
+  };
+  assert.equal(promotionNote(noBadge, new Date("2026-10-24T01:00:00+08:00")), "错峰");
+  assert.equal(promotionNote(noBadge, new Date("2026-10-24T12:00:00+08:00")), "错峰（未生效）");
 
-  // 有效期已过的活动不再提示（标签与时段都不再出现）。
-  assert.equal(
-    promotionNote({
-      promotion: { rate: "免费", validUntil: "2026-10-01T00:00:00Z" },
-    }),
-    undefined,
-  );
-  assert.equal(
-    promotionWindow({
-      promotion: { rate: "免费", validUntil: "2026-10-01T00:00:00Z" },
-    }),
-    undefined,
-  );
+  /**
+   * 有效期已过的一次性活动：整条消失（不报折扣价、不给标签）。
+   *
+   * ⚠️ 与**循环时段**不同：错峰窗口明天还会再来，所以窗口外要保留
+   * 「错峰（未生效）」；一次性活动过期就是没了，再挂标签只是噪声。
+   */
+  const expired = {
+    creditsRate: "x0.29",
+    promotion: { rate: "免费", validUntil: "2026-10-01T00:00:00Z" },
+  };
+  assert.equal(rateLabel(expired, new Date("2026-10-24T00:00:00Z")), "x0.29");
+  assert.equal(promotionNote(expired, new Date("2026-10-24T00:00:00Z")), undefined);
+  assert.equal(promotionWindow(expired, new Date("2026-10-24T00:00:00Z")), undefined);
 
-  // Trae 只有活动终点，没有每日时段；按本地时间展示到分钟。
+  // Trae 只有活动终点，没有每日时段；展示到分钟。
   const endsAt = new Date("2026-10-25T10:30:00Z");
   const stamp =
     String(endsAt.getMonth() + 1).padStart(2, "0") +
@@ -579,21 +614,18 @@ test("promotion notes describe the window while rates stay as the catalog states
     String(endsAt.getHours()).padStart(2, "0") +
     ":" +
     String(endsAt.getMinutes()).padStart(2, "0");
+  const limited = { creditsRate: 0.08, originalCreditsRate: 0.8, discountEndsAtSec: Math.floor(endsAt.getTime() / 1000) };
   assert.equal(
-    promotionNote(
-      { discountEndsAtSec: Math.floor(endsAt.getTime() / 1000) },
-      new Date("2026-10-20T00:00:00Z"),
-    ),
-    "限时折扣至 " + stamp,
+    promotionWindow(limited, new Date("2026-10-20T00:00:00Z")),
+    "至 " + stamp,
   );
-  // 活动已结束就不再提示。
+  // 活动已结束就不再提示（一次性活动过期即消失，见上一条）。
   assert.equal(
-    promotionNote(
-      { discountEndsAtSec: Math.floor(endsAt.getTime() / 1000) },
-      new Date("2026-10-26T00:00:00Z"),
-    ),
+    promotionNote(limited, new Date("2026-10-26T00:00:00Z")),
     undefined,
   );
+  // 结束时刻未到时按折后价展示。
+  assert.equal(rateLabel(limited, new Date("2026-10-20T00:00:00Z")), "x0.8→x0.08");
 });
 
 test("promotion parser keeps windowed free offers and drops ended placeholders", () => {  const config = {

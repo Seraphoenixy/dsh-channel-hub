@@ -1,5 +1,6 @@
 import { authorizationLink } from "../host/browser.ts";
 import { rateLabel } from "../core/rate.ts";
+import { extendedTierLabel } from "../core/context.ts";
 import { promotionsFromConfig } from "../core/promotion.ts";
 import { AccountPool } from "../../vendor/ofm/src/account-pool.ts";
 import { CodeArtsAuth } from "../../vendor/ofm/src/service.ts";
@@ -467,10 +468,23 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
           for (const m of (await catalog.load(id + ":" + a.id)).models)
             models.set(m.id, m);
         const hidden = pool.disabledModelsFor(id);
+        // 「大窗口档」是否启用 —— 只有 Trae 有这个概念，其余渠道恒 false。
+        const extended = id === "trae" && product.maxMode === true;
         return [...models.values()]
           .filter((m) => !hidden.has(m.id))
           .map((m) => {
             const rate = rateLabel(m);
+            /**
+             * 大窗口档后缀：`1M`。
+             *
+             * ⚠️ 必须拼进 `name`（模型菜单只渲染 name，见 `traeDisplayName`
+             * 的同一条理由）；且**只在真正启用时**拼 —— 未启用却写 1M 会让
+             * 用户以为已经在用大窗口。
+             */
+            const tier = extendedTierLabel(m, extended);
+            const decorated =
+              (rate === undefined ? m.name : m.name + " · " + rate) +
+              (tier === undefined ? "" : " · " + tier);
             return {
               ...m,
               inputModalities:
@@ -478,7 +492,7 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
                   ? ["text", "image"]
                   : ["text"],
               provider: "channel-hub/" + id,
-              name: rate === undefined ? m.name : m.name + " · " + rate,
+              name: decorated,
             };
           });
       };
@@ -612,6 +626,31 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
         claim,
         renew: renewAccount,
         discover,
+        /**
+         * 该渠道是否支持「大窗口档」（目前只有 Trae 的 Max 1M 档）。
+         *
+         * ⚠️ **能力与开关分开**：`supported` 只看适配器有没有这个档位概念，
+         * `enabled` 是用户此刻的选择。把两者合成一个布尔会让界面无法回答
+         * 「为什么我看不到 1M」——是模型不支持，还是我没开。
+         */
+        extendedContext: {
+          supported: id === "trae",
+          enabled: () => product.maxMode === true,
+          /**
+           * 切换大窗口档。
+           *
+           * ⚠️ 只改 `product.maxMode` 就够：适配器在每次 `resolveModel` /
+           * `stream` 时现读 `this.product.maxMode`（见 `TraeAdapter.maxModeFor`），
+           * 且 `options.product` 与这里持有的是**同一个对象**。故不需要重建
+           * 适配器 —— 重建会顺带丢掉远端目录缓存。
+           */
+          set: async (enabled) => {
+            if (id !== "trae") throw Error("该渠道没有大窗口档");
+            product.maxMode = enabled === true;
+            await store.call("set", "extended-context:" + id, enabled === true);
+            ctx.emit("llm/adapters-updated");
+          },
+        },
         // 停止时落盘签名缓存（`undefined` 的渠道直接跳过）。
         flush: sigStore === undefined ? undefined : () => sigStore.flush(),
       });
@@ -735,6 +774,23 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
         await Promise.allSettled([...pending.values()].filter((p) => p.status === "pending").map((p) => p.completion));
     },
     read,
+    /**
+     * 恢复持久化的渠道级设置（目前只有 Trae 的大窗口档开关）。
+     *
+     * ⚠️ **必须在 `hydrate()` 之前完成**：`resolveModel` 的档位与 `visible()`
+     * 的名字后缀都读 `product.maxMode`，晚一步会让首屏按默认值渲染一遍
+     * （用户会看到名字里没有 `1M`、随后才跳变）。
+     *
+     * 读不到键时保持产品默认（`DSH_TRAE_MAX_MODE` 环境变量，缺省关闭）——
+     * 不把「没有记录」当成「用户关掉了」，否则环境变量会被静默覆盖。
+     */
+    async restore() {
+      const saved = await store.call("get", "extended-context:trae");
+      if (typeof saved === "boolean") {
+        const driver = drivers.get("trae");
+        if (driver?.product) driver.product.maxMode = saved;
+      }
+    },
     async hydrate() {
       for (const d of drivers.values()) await d.hydrate?.();
     },

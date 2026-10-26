@@ -28,7 +28,6 @@ import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { settingsNamespaceFor } from './settings-compat.js'
 import {
   TRAE_DEFAULT_MODEL,
-  TRAE_MAX_CONTEXT_TOKENS,
   TRAE_REQUEST_TIMEOUT_MS,
   clampTraeMaxTokens,
   isTraeExpired,
@@ -705,35 +704,70 @@ export class TraeAdapter extends LlmAdapter {
    * ⚠️ 开启 Max 模式时改用 `context_window_tokens.max`（1M）。两者**不能混用**：
    * 未开 Max 却声明 1M 会让 DSH 把超长上下文直接发出去，而上游按 200K 校验后
    * 拒绝（输入被截断或 4xx）。
+   *
+   * ⚠️ **不再用 `TRAE_MAX_CONTEXT_TOKENS` 补位**（2026-10-24 修正）：
+   * `maxModeFor` 已要求远端同时下发 `context_window_tokens.max`，故走到这里时
+   * `maxContextWindow` 必然有值。此前那个 `?? 1_000_000` 会给
+   * 「只标了 `max_mode`、没给窗口」的模型（实测 `kimi-k2.6`：`maxMode=true`、
+   * 无 `maxContextWindow`、dev 仅 116000）**凭空声明 1M** —— DSH 会据此把
+   * 远超上游校验线的上下文发出去，压缩点也被推到 80 万 token。
    */
   private contextWindowFor(model: string): number | undefined {
     const meta = this.remoteMeta.get(model)
-    if (this.maxModeFor(model)) {
-      return meta?.maxContextWindow ?? TRAE_MAX_CONTEXT_TOKENS
-    }
+    if (this.maxModeFor(model)) return meta?.maxContextWindow
     return meta?.contextWindow ?? this.fallbackIndex.get(model)?.contextWindow
   }
 
   /**
    * 该模型本次是否启用 **Max 模式**（1M 上下文）。
    *
-   * 三个条件缺一不可（对齐 `Trae2api-cn/trae_remote_client.py:249-277`）：
-   * 1. 产品级开关（`DSH_TRAE_MAX_MODE`）未关 —— **默认开启**，用户要求
-   *    「上下文用最大的那一档」；显式设 `0` / `false` 才关回 200K；
+   * 四个条件缺一不可（对齐 `Trae2api-cn/trae_remote_client.py:249-277`）：
+   * 1. 产品级开关（`DSH_TRAE_MAX_MODE`，渠道中心可切换）**显式开启** ——
+   *    默认**关闭**（2026-10-24 修正，见 `trae-product.ts` 的说明）；
    * 2. 远端 `display_config.max_mode === true` —— **绝不**给未标记的模型硬套
    *    Max 参数，上游会拒绝（`_max_mode_requested` 的注释明写
    *    "Never fabricate max limits for a model the account config does not mark"）；
-   * 3. 若配置了白名单，模型须在其中。
+   * 3. 远端确实下发了 `context_window_tokens.max` —— 只标了开关、没给窗口时
+   *    **不进 Max 档**（否则等于替上游编造窗口，见 `contextWindowFor`）；
+   * 4. 若配置了白名单，模型须在其中。
    */
   private maxModeFor(model: string): boolean {
     if (this.product.maxMode !== true) return false
     const meta = this.remoteMeta.get(model)
     if (meta === undefined || meta.maxMode !== true) return false
+    // ⚠️ 窗口缺失即视为「远端没有声明这一档」，退回常规 `dev` 档。
+    if (meta.maxContextWindow === undefined || meta.maxContextWindow <= 0) return false
     const whitelist = this.product.maxModeModels
     if (whitelist !== undefined && whitelist.length > 0 && !whitelist.includes('*')) {
       return whitelist.includes(model)
     }
     return true
+  }
+
+  /**
+   * 该模型**是否有 Max 档**（能力，与是否启用无关）。
+   *
+   * 供展示层标注「Max 1M」：只认远端「开关 + 窗口」两个事实同时成立，
+   * 与 {@link maxModeFor} 的准入判据同源，避免界面承诺一个发不出去的档位。
+   */
+  maxTierFor(model: string): { contextWindow: number } | undefined {
+    const meta = this.remoteMeta.get(model)
+    if (meta === undefined || meta.maxMode !== true) return undefined
+    const window = meta.maxContextWindow
+    if (window === undefined || window <= 0) return undefined
+    // 窗口不大于常规档时不算另一档（实测存在 max == dev 的条目）。
+    if (meta.contextWindow !== undefined && window <= meta.contextWindow) return undefined
+    return { contextWindow: window }
+  }
+
+  /** 当前是否启用 Max 档（渠道中心的开关读它）。 */
+  get maxModeEnabled(): boolean {
+    return this.product.maxMode === true
+  }
+
+  /** 运行时切换 Max 档开关（持久化由接线侧负责）。 */
+  setMaxModeEnabled(enabled: boolean): void {
+    this.product.maxMode = enabled === true
   }
 
   /**
@@ -1029,15 +1063,16 @@ export class TraeAdapter extends LlmAdapter {
     // ⚠️ 必须在 `clampTraeMaxTokens` **之后**执行：Max 会话的输出上限由远端
     // `__max` 明细声明（可能高于 64K 安全线），被 clamp 覆盖会让 Max 请求
     // 与常规请求的输出预算相同、失去意义。
+    //
+    // ⚠️ `context_window_size` **必须用远端声明的值**，不能用常量补位：
+    // `maxModeFor` 已保证 `maxContextWindow` 存在（缺失即不进 Max 档）。
     if (this.maxModeFor(options.model)) {
       const meta = this.remoteMeta.get(options.model)
-      Object.assign(
-        openaiBody,
-        traeMaxModeFields(
-          meta?.maxContextWindow ?? TRAE_MAX_CONTEXT_TOKENS,
-          meta?.maxModeOutputTokens,
-        ),
+      const maxFields = traeMaxModeFields(
+        meta?.maxContextWindow ?? 0,
+        meta?.maxModeOutputTokens,
       )
+      if (maxFields !== undefined) Object.assign(openaiBody, maxFields)
     }
 
     // system 提示并入 messages 顶部（同样要在转换之前，以便 content 被规范化）。

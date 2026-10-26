@@ -60,6 +60,18 @@ export const MODEL_REFRESH_INTERVAL_MS = 2 * 3_600_000
 export interface RemoteModel {
   id: string
   name: string
+  /**
+   * 上游下发的上下文窗口（若该端点带）。
+   *
+   * ⚠️ **上游不带就留 `undefined`，不要拿静态表硬填**（2026-10-24）：
+   * 两个端点（`gateway/config` 的 `result.models`、`snap-access` 的
+   * `builtinModels`）实测只保证 `model_id` / `model_name`，字段名也可能变。
+   * 这里做**宽容读取**：认得出来就透传，认不出来交给 `llm-adapter.ts` 的
+   * `CONTEXT_WINDOWS` 静态表按 id 兜底 —— 那张表是人工核对过的。
+   */
+  contextWindow?: number
+  /** 上游下发的单次输出上限（若该端点带）。 */
+  maxTokens?: number
 }
 
 /** 模块级内存缓存：远端拉取或磁盘加载后填充；availableCodeArtsModels 优先读取。 */
@@ -84,7 +96,17 @@ export function normalizeModelId(id: string): string {
   return id
 }
 
-function parseModelInfo(m: Record<string, unknown>, seen: Set<string>): RemoteModel | undefined {
+/**
+ * 把上游目录里的一条模型条目解析成 {@link RemoteModel}。
+ *
+ * 过滤规则：id 为空、视觉（VL）模型、重复 id 一律返回 `undefined`。
+ * 上下文窗口与输出上限是**宽容读取**（多个可能的字段名 + 字符串形态），
+ * 认不出来就留 `undefined` —— 见 {@link RemoteModel.contextWindow}。
+ *
+ * @param m 上游条目（`gateway/config` 的 `result.models[]` 或 `builtinModels[]`）。
+ * @param seen 已见过的 id 集合（跨条目去重，调用方持有）。
+ */
+export function parseModelInfo(m: Record<string, unknown>, seen: Set<string>): RemoteModel | undefined {
   const rawId = m['model_id']
   if (typeof rawId !== 'string' || rawId.length === 0) return undefined
   const id = normalizeModelId(rawId)
@@ -96,7 +118,27 @@ function parseModelInfo(m: Record<string, unknown>, seen: Set<string>): RemoteMo
   const name = typeof rawName === 'string' && rawName.length > 0 ? normalizeModelId(rawName) : id
   if (seen.has(id)) return undefined
   seen.add(id)
-  return { id, name }
+  // 上下文窗口 / 输出上限：**宽容读取**，认不出来就留 undefined。
+  // ⚠️ 不要在这里补默认值：编造窗口会让 DSH 的自动压缩按错误阈值工作
+  // （见 `models.ts` 里 `RemoteModel.contextWindow` 的说明）。
+  const contextWindow = positiveInt(
+    m['context_window'] ?? m['contextWindow'] ?? m['max_input_tokens'] ?? m['maxInputTokens'],
+  )
+  const maxTokens = positiveInt(
+    m['max_tokens'] ?? m['maxTokens'] ?? m['max_output_tokens'] ?? m['maxOutputTokens'],
+  )
+  return {
+    id,
+    name,
+    ...contextWindow === undefined ? {} : { contextWindow },
+    ...maxTokens === undefined ? {} : { maxTokens },
+  }
+}
+
+/** 只接受有限正数（浮点向下取整）；其余返回 undefined。 */
+function positiveInt(value: unknown): number | undefined {
+  const n = typeof value === 'string' ? Number(value) : value
+  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.trunc(n) : undefined
 }
 
 /** 从 JSON 响应中沿路径指针取数组。 */

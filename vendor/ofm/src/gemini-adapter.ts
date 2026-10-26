@@ -326,21 +326,40 @@ export class GeminiAdapter extends LlmAdapter {
     _signal?: AbortSignal,
   ): Promise<LlmResolvedModelInfo> {
     const entry = this.loadModels().find((item) => item.id === model)
+    /**
+     * 静态表兜底（2026-10-24）。
+     *
+     * ⚠️ **`fetchAvailableModels` 实测并不下发 `inputTokenLimit`**：真实目录
+     * （线上快照，`catalog:gemini:*`）里那条模型只有 `displayName` /
+     * `supportsImage` / 档位后缀，`contextWindow` 是 undefined。而
+     * `GEMINI_FALLBACK_MODELS` 里早就写着 1M —— 它此前**只被 import、从未被
+     * 读取**（`geminiFallbackEntries` 零调用方），于是这个渠道在宿主看来
+     * 「没有上下文容量」：`dsh-compaction-basic` 每步抛
+     * `no context capacity for channel-hub/gemini/<model>`，自动压缩永不生效。
+     *
+     * 顺序与其余渠道一致：**目录下发优先，静态表补位**，两者都没有才留
+     * undefined（未知 id 不编造窗口）。
+     */
+    const fallback =
+      entry?.contextWindow !== undefined && entry.contextWindow > 0
+        ? undefined
+        : geminiFallbackEntries().find((item) => item.id === model)
     const resolved: LlmResolvedModelInfo = {
       provider,
       id: model,
-      name: entry?.name ?? model,
+      name: entry?.name ?? fallback?.name ?? model,
       inputModalities: this.inputModalitiesFor(entry),
     }
     // ⚠️ 未知模型不编造 context（宁可让 DSH 用默认值，也不报一个假窗口）
-    if (entry !== undefined && entry.contextWindow > 0) {
-      resolved.context = { contextWindow: entry.contextWindow }
+    const contextWindow = entry?.contextWindow ?? fallback?.contextWindow
+    if (contextWindow !== undefined && contextWindow > 0) {
+      resolved.context = { contextWindow }
     }
     // ⚠️ 远端/静态非法值必须过滤：0/负数/NaN 会让 DSH 抛
     // `INVALID_MODEL_MAX_TOKENS`，**整轮对话起不来**（不是降级，是崩）。
     // ⚠️ 先取局部变量再判：`entry.maxTokens` 是可选属性，
     // `Number.isSafeInteger` 不做类型收窄，直接连写会报 TS18048。
-    const maxTokens = entry?.maxTokens
+    const maxTokens = entry?.maxTokens ?? fallback?.maxTokens
     if (maxTokens !== undefined && Number.isSafeInteger(maxTokens) && maxTokens > 0) {
       resolved.defaultMaxTokens = maxTokens
     }

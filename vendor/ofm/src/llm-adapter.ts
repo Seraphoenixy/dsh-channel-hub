@@ -995,9 +995,21 @@ export class CodeArtsAdapter extends LlmAdapter {
     await this.ensureRemoteModels()
     const remoteModel = this.remoteModels?.find((m) => m.id === model)
     const name = remoteModel?.name ?? model
-    const contextWindow = CONTEXT_WINDOWS.get(model)
+    // 上下文窗口：**远端下发优先**，静态表按 id 兜底。
+    //
+    // ⚠️ 顺序不能反（2026-10-24）：静态表是人工核对过的编译期快照，只覆盖
+    // 5 个模型；上游一旦在目录里带上窗口（`context_window` / `max_input_tokens`
+    // 等），那是**账号侧的真实值**，比快照新。
+    // ⚠️ 两者都没有时**保持 undefined**，不编造 —— 宿主
+    // `dsh-compaction-basic` 会因 `no context capacity` 跳过自动压缩
+    // （可见的一条 warn），而不是按一个假窗口把历史压坏。
+    const contextWindow = remoteModel?.contextWindow ?? CONTEXT_WINDOWS.get(model)
     const resolved: LlmResolvedModelInfo = { provider, id: model, name }
-    if (contextWindow !== undefined) resolved.context = { contextWindow }
+    if (contextWindow !== undefined && contextWindow > 0) resolved.context = { contextWindow }
+    // ⚠️ **不声明 `defaultMaxTokens`**：本渠道的输出上限由 `stream()` 里
+    // `max_tokens: options.maxTokens ?? 65536` 统一决定，那个 65536 有实测依据
+    // （131072 会被后端拒成空流）。把目录里的值透传成 DSH 默认值等于绕过
+    // 这道实测过的收敛，收益不明、风险明确。
     // 思考开关（实测，2026-09-29）：本网关**唯一**真正生效的思考控制是
     // 顶层 `thinking.type`。`reasoning_effort`（含 low/high/none/minimal）与
     // 嵌套 `reasoning.effort` 都被服务端接受但**完全无效果**（判据为服务端

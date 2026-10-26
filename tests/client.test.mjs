@@ -806,3 +806,82 @@ test("stackHeights degrades safely at the edges", () => {
   assert.equal(tiny.length, 3);
   for (const h of tiny) assert.ok(h > 0 && Math.abs(h - 4 / 3) < 1e-9);
 });
+
+test("the extended-context switch only renders for channels that declare it", () => {
+  // 2026-10-24：Trae 的 Max 档（1M）与常规档计费不同，而目录只下发一个
+  // `consumption_rate`。故必须有一个**显式开关**让用户自己选，且开关只出现在
+  // 真正有该能力的渠道卡上（其余渠道 `extendedContext` 是 undefined）。
+  const withTier = renderChannels([
+    {
+      id: "trae",
+      name: "Trae",
+      selectedAccountId: null,
+      extendedContext: { supported: true, enabled: false },
+      accounts: [],
+    },
+    { id: "qoder", name: "Qoder", selectedAccountId: null, accounts: [] },
+  ]);
+  const toggles = nodes(withTier).filter(
+    (n) => n.props?.className === "chub-context-toggle",
+  );
+  assert.equal(toggles.length, 1, "only the channel with the capability gets a toggle");
+  const box = nodes(toggles[0]).find((n) => n.type === "input");
+  assert.equal(box?.props?.type, "checkbox");
+  assert.equal(box?.props?.checked, false);
+  // 关闭态必须能打开：payload 里带 provider 与目标状态。
+  const onChange = box?.props?.onChange;
+  assert.equal(typeof onChange, "function");
+  assert.ok(
+    /channels\.setExtendedContext/.test(decoded),
+    "the toggle must call the dedicated RPC, not models.setDisabled",
+  );
+});
+
+test("the extended-context switch reflects the persisted state", () => {
+  const on = renderChannels([
+    {
+      id: "trae",
+      name: "Trae",
+      selectedAccountId: null,
+      extendedContext: { supported: true, enabled: true },
+      accounts: [],
+    },
+  ]);
+  const box = nodes(on)
+    .filter((n) => n.props?.className === "chub-context-toggle")
+    .map((n) => nodes(n).find((c) => c.type === "input"))
+    .find(Boolean);
+  assert.equal(box?.props?.checked, true);
+});
+
+test("a model row shows the larger window as a tier badge, dashed when inactive", () => {
+  // 徽标只在「目录确实声明了更大一档」时出现；且用 active 区分已开/未开。
+  assert.ok(
+    /\.chub-tier\{[^}]*border:1px dashed/.test(css),
+    "an inactive tier must be visually weaker than an active one",
+  );
+  assert.ok(
+    /\.chub-tier\.on\{[^}]*border-style:solid/.test(css),
+    "the active tier must switch to a solid border",
+  );
+  assert.ok(
+    /\.chub-tier\.on\{[^}]*background:/.test(css),
+    "the active tier must be filled, not just outlined",
+  );
+});
+
+test("a Trae off-peak model shows the window in the title, not the chip", () => {
+  // Trae 实测最多 4 段窗口；chip 是 `flex:none`，拼进去会撑破模型行。
+  // 故 chip 只说「错峰 / 错峰（未生效）」，完整时段进 title。
+  const tierChip = (name) => new RegExp("\.chub-" + name + "\{").test(css);
+  assert.ok(tierChip("promo"), "the promotion chip exists");
+  assert.ok(
+    /\.chub-promo\{[^}]*white-space:nowrap/.test(css),
+    "the chip must not wrap — that is why the window cannot live there",
+  );
+  // 文案里带时段的那条分支必须还在（promotionWindow 进 title）。
+  assert.ok(
+    /promotionWindow/.test(decoded),
+    "the window text must still be rendered (in the tooltip)",
+  );
+});

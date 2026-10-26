@@ -638,6 +638,41 @@ export function applyTraeRefresh(
 
 // ── 模型列表解析 ──
 
+/**
+ * 一个**时段折扣**窗口（`activity_discount.data.off_peak`）。
+ *
+ * 真实形状（实测 `~/.dsh/trae-cn/models.json`）：
+ *
+ * ```json
+ * { "before_consumption_rate": 0.2, "after_consumption_rate": 0.1, "discount": 50,
+ *   "time_windows": [
+ *     { "weekdays": [1,2,3,4,5,6,7], "start_minute": 0,    "end_minute": 480  },
+ *     { "weekdays": [1,2,3,4,5,6,7], "start_minute": 1320, "end_minute": 1440 }],
+ *   "time_zone": "Asia/Shanghai" }
+ * ```
+ *
+ * ⚠️ `weekdays` 是 **1=周一 … 7=周日**（不是 `Date.getDay()` 的 0=周日），
+ * 且 `end_minute` 用 **1440** 表示当日 24:00（不是 0）。两者都实测过，
+ * 按直觉写会整体偏一天 / 丢掉整个夜间段。
+ */
+export interface TraeOffPeakDiscount {
+  /** 折扣前的倍率。 */
+  beforeRate: number
+  /** 折扣后的倍率。 */
+  afterRate: number
+  /** 每日时段；为空表示上游声明了活动但没给窗口（此时**不可**推断生效）。 */
+  windows: readonly TraeTimeWindow[]
+  /** 时区（IANA）。实测多数条目不带，缺省按 `Asia/Shanghai`。 */
+  timezone?: string
+}
+
+/** 一个每日时段（分钟粒度，`weekdays` 为 1=周一 … 7=周日）。 */
+export interface TraeTimeWindow {
+  weekdays?: readonly number[]
+  startMinute: number
+  endMinute: number
+}
+
 /** TRAE 远端模型条目。 */
 export interface TraeRemoteModel {
   id: string
@@ -697,9 +732,9 @@ export interface TraeRemoteModel {
    */
   creditsRate?: number
   /**
-   * 活动折扣的原价（`activity_discount.data.current.before_consumption_rate`）。
+   * 活动折扣的原价（`activity_discount.data.<type>.before_consumption_rate`）。
    *
-   * 只有**当前确实生效**时才填充（见 {@link readActivityDiscount} 的三条判据）。
+   * 只有**此刻确实生效**时才填充（见 {@link readActivityDiscount}）。
    * 与 {@link creditsRate} 配对展示为 `x原价→x折后价`。
    */
   originalCreditsRate?: number
@@ -711,6 +746,33 @@ export interface TraeRemoteModel {
    * `promotion.active === false` 同类语义：显示会误导用户按折扣价预期。
    */
   discountEndsAtSec?: number
+  /**
+   * **时段折扣**（错峰 / 夜间），与 {@link originalCreditsRate} 互斥地描述
+   * 「另一档价格」。
+   *
+   * ## 为什么必须单独一个字段（2026-10-24 修正）
+   *
+   * 目录里的 `activity_discount.data` 有**两类**子对象：
+   *
+   * | 子键 | 是否限时段 | 判据 |
+   * |---|---|---|
+   * | `limited` | 否（一次性活动） | 带 `end_at` |
+   * | `subsidy` | 否（补贴） | 无窗口 |
+   * | `member` | 否（会员价） | 无窗口 |
+   * | `off_peak` | **是** | 带 `time_windows` |
+   *
+   * 旧实现只读 `data.current`，而 `current` 是**抓取那一刻**的快照：
+   * 实测同一份导出里 `DeepSeek-V4-Flash-Official` 的 `current.discount_type`
+   * 是 `"none"`，但它明确带 `off_peak.time_windows = 00:00–08:00 / 22:00–24:00`
+   * 与 `discount: 50`。照旧实现读，**整条时段折扣被静默丢弃** ——
+   * 用户永远看不到「夜间半价」。
+   *
+   * 这与 Qoder 的 `promotion.active` 是同一个坑：快照会过期，必须按窗口
+   * 在**本地**推算「此刻是否在时段内」。故这里保留原始窗口，由展示层
+   * （`src/core/rate.ts`）按当前时刻判断。
+   */
+  offPeak?: TraeOffPeakDiscount
+
   /**
    * 用途（`usage`），如 `"chat_completion"`、`"multimodal"` 等。
    *
@@ -998,6 +1060,11 @@ export function readConsumptionRate(entry: Record<string, unknown>): number | un
  *
  * `end_at`（Unix 秒）仅 `limited` 型带；**已过期**时整个折扣视为不存在 ——
  * 否则用户会按折扣价预期、实际被按原价计费。
+ *
+ * ⚠️ **本函数只处理「不限时段」的折扣**（`subsidy` / `member` / `limited`）。
+ * 时段折扣（`off_peak`，带 `time_windows`）走 {@link readOffPeakDiscount}：
+ * 它的 `current` 只是抓取那一刻的快照，按本函数的判据读会在窗口外抓到
+ * `type:"none"` 而把整条折扣丢掉（真实缺陷，2026-10-24）。
  */
 export function readActivityDiscount(
   entry: Record<string, unknown>,
@@ -1021,6 +1088,12 @@ export function readActivityDiscount(
   const type = (readStringField(currentRecord, 'discount_type')
     || readStringField(currentRecord, 'discountType')).trim().toLowerCase()
   if (type.length === 0 || type === 'none') return undefined
+  // ⚠️ 时段折扣优先交给 {@link readOffPeakDiscount}（它按窗口本地推算）。
+  // 但**只有在那边确实解析出窗口时才让位** —— 否则 `current` 明说「此刻在
+  // 错峰档」而窗口块缺失时，会让折扣整条消失（比显示一个可能过期的快照更糟）。
+  if (type === 'off_peak' || type === 'offpeak') {
+    if (readOffPeakDiscount(entry) !== undefined) return undefined
+  }
   const before = readNumberField(currentRecord, 'before_consumption_rate')
     ?? readNumberField(currentRecord, 'beforeConsumptionRate')
   const after = readNumberField(currentRecord, 'consumption_rate')
@@ -1039,6 +1112,97 @@ export function readActivityDiscount(
   // 已过期的活动不再是「当前生效」。
   if (endsAtSec !== undefined && endsAtSec <= nowSec) return undefined
   return endsAtSec === undefined ? { originalRate: before } : { originalRate: before, endsAtSec }
+}
+
+/**
+ * 解析 `activity_discount.data.off_peak` —— **时段折扣**（错峰 / 夜间）。
+ *
+ * ## 为什么必须与 {@link readActivityDiscount} 分开（真实缺陷，2026-10-24）
+ *
+ * 旧实现只读 `data.current`，而 `current` 是**抓取那一刻**的快照。实测同一份
+ * 导出（`~/.dsh/trae-cn/models.json`）里：
+ *
+ * | 模型 | `current.discount_type` | `off_peak` |
+ * |---|---|---|
+ * | `DeepSeek-V4-Flash-Official` | **`none`** | 0.2→0.1，00:00–08:00 / 22:00–24:00 |
+ * | `DeepSeek-V4-Pro-Official` | **`none`** | 0.72→0.36，同上 |
+ * | `deepseek-v4.1-flash` | `off_peak` | 0.12→0.06，工作日三段 + 周末全天 |
+ *
+ * 前三者在窗口外抓目录时 `current.type` 就是 `"none"`，于是**整条时段折扣被
+ * 静默丢弃**，用户永远看不到「夜间半价」。这与 Qoder 的 `promotion.active`
+ * 是同一个坑：快照会过期，必须按窗口在**本地**推算。
+ *
+ * ## 判据
+ *
+ * 1. `activity_discount.enable !== false`；
+ * 2. 存在一个带**非空** `time_windows` 的子对象（实测键名 `off_peak`，
+ *    但不写死 —— `subKey` 已经换过两次，上游随时可能改名）；
+ * 3. `before` 为正、`after` 存在且**严格更小**（真正的降价）；
+ * 4. 至少解析出一条合法窗口 —— **没有窗口就不能推断生效**，宁可当作没有。
+ *
+ * @param entry 目录条目（`display_contact_config` 是 JSON 字符串）。
+ * @returns 时段折扣；任一判据不满足返回 `undefined`（不编造）。
+ */
+export function readOffPeakDiscount(
+  entry: Record<string, unknown>,
+): TraeOffPeakDiscount | undefined {
+  const raw = entry.display_contact_config ?? entry.DisplayContactConfig
+  if (typeof raw !== 'string' || raw.length === 0) return undefined
+  const config = parseJsonObject(raw)
+  if (config === undefined) return undefined
+  const discount = config.activity_discount ?? config.ActivityDiscount
+  if (typeof discount !== 'object' || discount === null) return undefined
+  const discountRecord = discount as Record<string, unknown>
+  if (readBooleanField(discountRecord, 'enable') === false) return undefined
+  const data = discountRecord.data ?? discountRecord.Data
+  if (typeof data !== 'object' || data === null) return undefined
+  const dataRecord = data as Record<string, unknown>
+
+  for (const [key, value] of Object.entries(dataRecord)) {
+    if (key === 'current' || key === 'Current') continue
+    if (typeof value !== 'object' || value === null) continue
+    const record = value as Record<string, unknown>
+    const windowsRaw = record.time_windows ?? record.timeWindows
+    if (!Array.isArray(windowsRaw) || windowsRaw.length === 0) continue
+    const before = readNumberField(record, 'before_consumption_rate')
+      ?? readNumberField(record, 'beforeConsumptionRate')
+    const after = readNumberField(record, 'after_consumption_rate')
+      ?? readNumberField(record, 'afterConsumptionRate')
+    if (before === undefined || before <= 0) continue
+    if (after === undefined || after < 0 || before <= after) continue
+
+    const windows: TraeTimeWindow[] = []
+    for (const item of windowsRaw) {
+      if (typeof item !== 'object' || item === null) continue
+      const w = item as Record<string, unknown>
+      const start = readNumberField(w, 'start_minute') ?? readNumberField(w, 'startMinute')
+      const end = readNumberField(w, 'end_minute') ?? readNumberField(w, 'endMinute')
+      // 1440 是合法的「当日 24:00」（实测），> 1440 或 start === end 才是脏值。
+      if (start === undefined || end === undefined) continue
+      if (start < 0 || start > 1440 || end < 0 || end > 1440 || start === end) continue
+      const weekdaysRaw = w.weekdays ?? w.weekDays
+      const weekdays = Array.isArray(weekdaysRaw)
+        ? weekdaysRaw.filter(
+            (day): day is number =>
+              typeof day === 'number' && Number.isInteger(day) && day >= 1 && day <= 7,
+          )
+        : undefined
+      windows.push({
+        ...weekdays === undefined || weekdays.length === 0 ? {} : { weekdays },
+        startMinute: Math.trunc(start),
+        endMinute: Math.trunc(end),
+      })
+    }
+    if (windows.length === 0) continue
+    const timezone = readStringField(record, 'time_zone') || readStringField(record, 'timeZone')
+    return {
+      beforeRate: before,
+      afterRate: after,
+      windows,
+      ...timezone.length > 0 ? { timezone } : {},
+    }
+  }
+  return undefined
 }
 
 /** 宽松解析 JSON 对象字符串；非对象（数组/标量/非法 JSON）返回 undefined。 */
@@ -1099,6 +1263,9 @@ function parseTraeConfigEntry(
   // 计费：`display_contact_config` 里的倍率与活动折扣（两次 JSON.parse）。
   const creditsRate = readConsumptionRate(entry)
   const discount = readActivityDiscount(entry)
+  // 时段折扣单独一条：它的生效窗口必须由展示层按当前时刻推算，
+  // 不能与「一次性活动」混成同一个 `originalCreditsRate`（见 readOffPeakDiscount）。
+  const offPeak = readOffPeakDiscount(entry)
   return {
     id,
     name,
@@ -1118,6 +1285,7 @@ function parseTraeConfigEntry(
     ...creditsRate === undefined ? {} : { creditsRate },
     ...discount === undefined ? {} : { originalCreditsRate: discount.originalRate },
     ...discount?.endsAtSec === undefined ? {} : { discountEndsAtSec: discount.endsAtSec },
+    ...offPeak === undefined ? {} : { offPeak },
   }
 }
 
@@ -1502,14 +1670,19 @@ export const TRAE_MAX_MODE_TYPE = 1
  * - 只有远端明确标了 `display_config.max_mode === true` 的模型才能用；
  *   给未标记的模型硬套 Max 参数会被上游拒绝（见 `_max_mode_requested`）。
  *
+ * ⚠️ **`maxContext` 缺失时返回 `undefined`，不再用 1M 常量补位**
+ * （2026-10-24 修正）：窗口大小是**上游的准入参数**，替它编一个等于让请求
+ * 必然被拒或静默截断。调用方据此保持常规档。
+ *
  * @param maxContext 该模型声明的 Max 窗口（远端 `context_window_tokens.max`）
  * @param outputMax Max 模式下的输出上限；缺省用 {@link TRAE_MAX_OUTPUT_TOKENS}
+ * @returns Max 会话的 wire 字段；`maxContext` 非正数时 `undefined`
  */
 export function traeMaxModeFields(
   maxContext: number,
   outputMax?: number,
-): Record<string, unknown> {
-  const context = maxContext > 0 ? maxContext : TRAE_MAX_CONTEXT_TOKENS
+): Record<string, unknown> | undefined {
+  if (!Number.isFinite(maxContext) || maxContext <= 0) return undefined
   return {
     model_auto_selection: {
       strategy: 'max',
@@ -1518,7 +1691,7 @@ export function traeMaxModeFields(
     },
     model_selection_strategy: 'max',
     mode_type: TRAE_MAX_MODE_TYPE,
-    context_window_size: context,
+    context_window_size: maxContext,
     prompt_max_tokens: TRAE_MAX_PROMPT_TOKENS,
     max_tokens: outputMax !== undefined && outputMax > 0 ? outputMax : TRAE_MAX_OUTPUT_TOKENS,
   }

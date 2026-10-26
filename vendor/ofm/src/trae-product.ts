@@ -136,18 +136,22 @@ export interface TraeProduct {
    */
   fallbackMaxOutputTokens?: number
   /**
-   * 是否启用 **Max 模式**（1M 上下文）。**默认开启**，显式设 `DSH_TRAE_MAX_MODE=0` 关闭。
+   * 是否启用 **Max 模式**（1M 上下文）。**默认关闭**，需显式设
+   * `DSH_TRAE_MAX_MODE=1`（或在渠道中心打开该开关）。
    *
-   * 默认开的原因（用户要求）：上下文应当用**最大的那一档**。开启后只有远端
-   * `display_config.max_mode === true` 的模型才会走 1M —— 未标记的模型即便
-   * 开关为开也仍走常规 `dev`(200K)，见 `TraeAdapter.maxModeFor`，所以开启
-   * 不会让任何模型失败。
+   * ## 为什么默认关（2026-10-24 修正）
    *
-   * ⚠️ Max 会话向 1M 窗口里塞入远超常规的上下文，**计费倍率与常规会话不同**
-   * （远端按 `strategy=max` 单独计价）。需要省额度时设 `DSH_TRAE_MAX_MODE=0`。
+   * Max 会话向 1M 窗口里塞入远超常规的上下文，**计费倍率与常规会话不同**
+   * （远端按 `strategy=max` 单独计价），而目录**只下发一个 `consumption_rate`**
+   * —— 实测（`~/.dsh/trae-cn/models.json`，20 条）没有 `max_*` 倍率字段，
+   * `fee_model_level` 恒为 2、`is_dollar_max` 恒为 null。也就是说开启 Max 后
+   * 界面显示的倍率仍是常规档的，用户看到 x0.08、实际按另一档计费。
    *
-   * 与 `Trae2api-cn` 的 `TRAE_REMOTE_MAX_MODE` 同名（但那边默认 `0`，本插件
-   * 按用户要求改为默认开）。
+   * 此前默认开启的依据是「上下文用最大的那一档」，但那等于**默认替用户选择
+   * 一个价格未知的档位**。现在改为默认关：常规档（`dev`，200K/256K）行为与
+   * 其它渠道一致，要 1M 的人自己开 —— 那时他知道自己在要什么。
+   *
+   * 与 `Trae2api-cn` 的 `TRAE_REMOTE_MAX_MODE` 默认值一致（那边也是 `0`）。
    */
   maxMode?: boolean
   /**
@@ -285,15 +289,15 @@ function isTruthyFlag(raw: string | undefined): boolean {
 }
 
 /**
- * 解析 `DSH_TRAE_MAX_MODE`；**默认开启**（用户要求「上下文用最大的那一档」）。
+ * 解析 `DSH_TRAE_MAX_MODE`；**默认关闭**。
  *
- * 只有显式假值（`0` / `false` / `no` / `off`）才关闭 —— 与
- * `isTruthyFlag` 的「默认关」语义相反，故单列一个函数，不要混用。
+ * 只有显式真值（`1` / `true` / `yes`）才开启 —— 与 {@link isTruthyFlag}
+ * 语义一致，故直接复用它。历史版本这里是「默认开、显式假值才关」，改回
+ * 默认关的理由见 {@link TraeProduct.maxMode}（计费倍率与常规档不同，
+ * 而目录不下发 Max 档倍率）。
  */
 function resolveMaxModeFlag(raw: string | undefined): boolean {
-  if (raw === undefined) return true
-  const value = raw.trim().toLowerCase()
-  return !(value === '0' || value === 'false' || value === 'no' || value === 'off')
+  return isTruthyFlag(raw)
 }
 
 /**
