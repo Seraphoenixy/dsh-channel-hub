@@ -9,6 +9,10 @@ import { BuddyAuth } from "../../vendor/ofm/src/buddy-auth.ts";
 import { BuddyAdapter } from "../../vendor/ofm/src/buddy-adapter.ts";
 import { CODEBUDDY, WORKBUDDY } from "../../vendor/ofm/src/product.ts";
 import {
+  BUDDY_CN_PROVIDER,
+  inspectBuddySystem,
+} from "../system/buddy-system.ts";
+import {
   fetchAuthState,
   decorateLoginUrl,
 } from "../../vendor/ofm/src/buddy-oauth.ts";
@@ -314,6 +318,32 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
           return { accountId: s.entry.id, credential: s.credential };
         },
         isReady: async () => Boolean(await resolveCredential("")),
+        // Buddy 国区的系统提示词整篇替换（策略与模板见 `src/system/buddy-system.ts`）。
+        // ⚠️ 只在 `buddy` 上挂这个钩子：WorkBuddy 国际版没有被 11128 拦截，
+        // 也没有这份模板的验收证据，不能顺带改动它的请求。
+        ...(id === BUDDY_CN_PROVIDER
+          ? {
+              rewriteSystem: ({ system, model, purpose }) => {
+                const verdict = inspectBuddySystem({
+                  provider: id,
+                  model,
+                  system,
+                  purpose,
+                });
+                if (verdict.replaced !== true) return undefined;
+                if (verdict.reviewNeeded) {
+                  // 换照做（用户要求无条件替换），但必须留痕：认不出宿主模板
+                  // 说明 DSH 升级改过系统提示词，本模板可能漏掉新段落。
+                  ctx.logger.warn(
+                    "Buddy 国区：未识别的系统提示词模板（长度 " +
+                      system.length +
+                      "），已按已审阅模板整篇替换；请复核是否需要更新模板。",
+                  );
+                }
+                return verdict.text;
+              },
+            }
+          : {}),
         // 以下三项只有 Gemini 适配器读取；其余渠道忽略（`undefined`）。
         ...(sigStore === undefined ? {} : { sigStore }),
         ...(projectCache === undefined ? {} : { projectCache }),

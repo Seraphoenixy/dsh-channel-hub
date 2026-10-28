@@ -217,6 +217,30 @@ export interface BuddyAdapterOptions {
     target: ImageRequestTarget,
   ) => Promise<{ data: Uint8Array; mediaType: string } | undefined>
   fetchImpl?: typeof fetch
+  /**
+   * 系统提示词改写钩子（本地适配）。
+   *
+   * Buddy 国区的网关会按内容指纹拦截整个请求
+   * （`code 11128 Illegal API invocation from an unapproved channel`），实测触发点
+   * 在系统提示词里，而不在工具定义或用户内容。放行办法是把系统提示词换成一份
+   * 已验证可达的等义模板；模板与「换不换」的策略都归 `src/` 维护，本适配器只
+   * 负责在**构造请求体的最后一步**把最终文本交出去。
+   *
+   * 契约：
+   * - 入参是本次请求的最终 system 文本（可能是 `options.system`，也可能是重放
+   *   前缀里 `role:'system'` 的消息）、本次模型 id、以及宿主的 `purpose`
+   *   （`'compaction' | 'session-title'`，普通对话为 `undefined`）；
+   * - 返回字符串即替换，返回 `undefined` 表示保持原样；
+   * - 钩子抛错时**原样发送、不阻断请求**：改写是绕过拦截的手段，不该成为新的
+   *   失败点。
+   *
+   * 未提供时行为与接入前完全一致。
+   */
+  rewriteSystem?: (input: {
+    system: string
+    model: string
+    purpose: string | undefined
+  }) => string | undefined
   /** 多账号池（用于限流时切换账号） */
   accountPool?: AccountPool
   /**
@@ -1354,6 +1378,46 @@ export class BuddyAdapter extends LlmAdapter {
       if (message.role === 'system' && typeof message.content === 'string') {
         message.content = rewriteTencentContentFingerprints(message.content, this.product.id)
       }
+    }
+    // 本地适配：整篇替换系统提示词（宿主注入 `rewriteSystem`，策略在 `src/`）。
+    // ⚠️ 必须排在指纹改写**之后**：换进来的模板已是可直接放行的文本，
+    // 若再被指纹规则二次改写，两处规则会互相覆盖，且模板不再逐字稳定
+    // （`prompt_cache_key` 的前缀缓存要求同一模型每轮发同一份文本）。
+    //
+    // 「全量替换」按系统消息的完整集合理解：该渠道下只保留一份替换文本。
+    // 宿主正常每轮只有一条 system 消息，但旁路/重放路径可能带上多条（例如
+    // 额外的应用级说明）；它们会被换成同一份模板，重复的只保留第一条 ——
+    // 否则同一份 3.4k 模板会被发送两遍，白占上下文。这正是「全量替换」的
+    // 代价：被替换掉的原文（含其中的补充说明）不再出现在请求里。
+    const rewriteSystem = this.options.rewriteSystem
+    if (rewriteSystem !== undefined) {
+      let principal: string | undefined
+      const duplicates: number[] = []
+      for (let index = 0; index < messages.length; index += 1) {
+        const message = messages[index]
+        if (message.role !== 'system' || typeof message.content !== 'string') continue
+        if (message.content.length === 0) continue
+        let replacement: string | undefined
+        try {
+          replacement = rewriteSystem({
+            system: message.content,
+            model: options.model,
+            purpose: options.purpose,
+          })
+        } catch {
+          // 改写是绕过拦截的手段，不该成为新的失败点：出错就原样发送。
+          replacement = undefined
+        }
+        if (typeof replacement !== 'string' || replacement.length === 0) continue
+        if (principal === undefined) {
+          principal = replacement
+          message.content = replacement
+          continue
+        }
+        if (replacement === principal) duplicates.push(index)
+        else message.content = replacement
+      }
+      for (const index of duplicates.reverse()) messages.splice(index, 1)
     }
     if (this.product.id === 'workbuddy' && (messages.length === 0 || messages[0].role !== 'system')) {
       messages.unshift({ role: 'system', content: 'You are a helpful assistant.' })

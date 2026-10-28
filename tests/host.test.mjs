@@ -540,9 +540,15 @@ test(
       if (url === "https://copilot.tencent.com/v2/chat/completions") {
         buddyInference++;
         const body = JSON.parse(init.body);
-        assert.equal(body.messages[0].content, "You are an AI agent running in DeepSeek Harness.\n\n" + guiFirst + "\n\n" + guiSecond);
-        assert.equal(body.messages[1].content, guiFirst + "\n\n" + guiSecond);
-        assert.equal(body.messages[2].content, guiPair);
+        // Buddy 国区：系统提示词被整篇换成 `src/system/buddy-system.ts` 的模板
+        // （模型槽位按本次请求填 hy3）。多条 system 会换成同一份模板，重复的
+        // 只保留第一条，所以这里只剩一条 system。
+        const systems = body.messages.filter((m) => m.role === "system");
+        assert.equal(systems.length, 1);
+        assert.match(systems[0].content, /你是在 DeepSeek Harness 中为用户完成编程工作的 AI 助手/);
+        assert.match(systems[0].content, /本次使用的模型是 hy3。/);
+        assert.ok(!systems[0].content.includes("{{MODEL_ID}}"));
+        assert.equal(body.messages.filter((m) => m.role === "user")[0].content, guiPair);
         assert.equal(body.tools[0].function.name, "read_file");
         return new Response('data: {"choices":[{"delta":{"content":"OK"},"finish_reason":null}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { headers: { "content-type": "text/event-stream" } });
       }

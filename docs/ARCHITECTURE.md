@@ -82,6 +82,7 @@ vendor 中保留来源快照用于比对；构建只跟随真实 import 图，�
 | `vendor/ofm/src/gemini-adapter.ts` | `resolveModel` 接上 `geminiFallbackEntries()`（远端优先、静态表补位） | 该表此前只被 import、零调用方；真实 `fetchAvailableModels` 不下发 `inputTokenLimit`，导致宿主 `dsh-compaction-basic` 每步抛 `no context capacity` | `tests/context-report.test.mjs` 的 Gemini 三项 + `tests/host.test.mjs` 的 `prepareCall().context` 断言 |
 | `vendor/ofm/src/llm-adapter.ts` | `resolveModel` 改为「远端窗口优先、静态表兜底」；**不**声明 `defaultMaxTokens` | 目录若带上真实窗口应优先；输出上限仍由实测过的 `max_tokens ?? 65536` 统一收敛（131072 会被后端拒成空流） | `tests/context-report.test.mjs` 的 CodeArts 三项 |
 | `vendor/ofm/src/models.ts` | `RemoteModel` 增加可选 `contextWindow` / `maxTokens`；`parseModelInfo` 宽容读取并导出 | 两个目录端点若下发窗口就透传；认不出留 undefined，**不补默认值** | 同上「directory parsing only forwards windows the upstream declares」 |
+| `vendor/ofm/src/buddy-adapter.ts` | `BuddyAdapterOptions` 新增可选 `rewriteSystem` 钩子；在系统消息组装完成、指纹改写**之后**调用，按「全量替换」语义改写 system 消息并去掉重复项 | Buddy 国区正常对话被上游以 `code 11128 Illegal API invocation from an unapproved channel` 拒绝，实测触发点在系统提示词。模板与「换不换」的策略归 `src/`（`src/system/`）维护，vendor 只留一个最小接线点，避免本地策略长进固定版本快照 | `tests/buddy-system.test.mjs` 13 项；`tests/host.test.mjs` 的 Buddy 段（整篇替换、模型槽位、用户内容不变）；真实推理验收见 `docs/ACCEPTANCE.md` 2026-10-28 |
 
 ## 边界
 
