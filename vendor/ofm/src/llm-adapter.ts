@@ -10,7 +10,7 @@ import { AccountPool, providerCatalogVisible } from './account-pool.js'
 import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { settingsNamespaceFor } from './settings-compat.js'
 import { nextUtc8DayStartMs } from './model-queue.js'
-import { isCodeArtsBenefitModel } from './models.js'
+import { isCodeArtsBenefitModel, isVisualModelId } from './models.js'
 import { normalizeHarnessMessages } from './message-shape.js'
 import { signRequestHuawei } from './sign.js'
 import { createBlankReasoningSuppressor, createReasoningLoopDetector, hasUsableToolName, isReasoningLoopGuardEnabled, isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, reasoningLoopFailure, resolveEmptyResponseReason, resolveToolPairing, stripCourseLeakFromHistoryContent, stripCourseLeakIfEnabled } from './sse.js'
@@ -55,16 +55,51 @@ const DEFAULT_MODELS: readonly string[] = [
 
 /**
  * 模型上下文窗口（最大合并请求+响应 token 数）。
- * - GLM-5.2：202752（对齐 CodeArts Agent IDE 模型卡标注）。
- * - glm-5.3-flash：1048576（1M，逆向自 IDE gateway/config，对齐 deveco-code-rust 90aeb17d）。
- * - deepseek-v4-flash / deepseek-v4-pro：1048576（1M，UI 标注）。
- * - deepseek-v4.1-flash：1000000（对齐 IDE 下发的 inferhub-provider 模型配置，
+ *
+ * ⚠️ 本表是**唯一**的窗口来源：CodeArts 的两个目录端点（`builtin`、
+ * 已下线的 `gateway/config`）实测都**不下发任何窗口字段**（`builtinModels`
+ * 的字段集只有 model_id/name/category/enable/desc/sku/provider/credit/… ，
+ * 没有 context_window / max_input_tokens 任何形态）。故未列在此表的模型在
+ * 宿主看来就是「没有上下文容量」，`dsh-compaction-basic` 会抛
+ * `no context capacity` 且自动压缩永不生效。
+ *
+ * ## 取值口径（2026-10-28 补充）
+ *
+ * 优先用**上游/发行方公布的通用窗口**；码道自己的实测值（IDE 模型卡、kernel
+ * 日志）更权威时优先于通用值 —— 见 `GLM-5.2` 与 `deepseek-v4.1-flash`。
+ * 无任何可核对来源的模型**仍不填**（不编造）。
+ *
+ * - `GLM-5.2`：202752（对齐 CodeArts Agent IDE 模型卡标注）。**刻意不采用**
+ *   buddy/qoder-product 里的通用 1M —— 码道侧实测就是 202752，两者口径不同。
+ * - `glm-5.3-flash`：1048576（1M，逆向自 IDE gateway/config，对齐 deveco-code-rust 90aeb17d）。
+ * - `glm-5.3`：1000000（通用 1M。智谱官方文档明确「支持 1M 上下文窗口，
+ *   最大输出 Tokens 为 128K」；buddy / qoder / loomy 三方同样按 1M。
+ *   ⚠️ 未拿到码道侧独立实测值，取通用口径）。
+ * - `glm-5.2-sft-harmony`（显示名 GLM-5.2-ArkTS-SPARK）：202752 —— 上游描述为
+ *   「基于 GLM-5.2 增训鸿蒙代码与开发知识」，属 GLM-5.2 微调版，故沿用码道
+ *   `GLM-5.2` 的实测窗口（同源底座、同上下文上限）。
+ * - `openpangu-2.0-flash` / `openpangu-2.0-pro`：524288（512K）。华为官方与
+ *   ModelScope 均标注 openPangu 2.0 两个版本为 512K 上下文。
+ * - `kimi-k3`：1000000（通用 1M，Moonshot 官方与世界模型同步公布；
+ *   buddy / qoder / raccoon 三方同样按 1M。trae 的 200K 是**该渠道档位**
+ *   而非模型通用值，不采信）。
+ * - `deepseek-v4-flash` / `deepseek-v4-pro`：1048576（1M，UI 标注）。
+ * - `deepseek-v4.1-flash`：1000000（对齐 IDE 下发的 inferhub-provider 模型配置，
  *   2026-09 kernel 日志；对齐 deveco-code-rust fb1b4a2）。
- * - 其余模型未公开上下文容量，留 undefined 让后端默认裁剪。
+ *
+ * ⚠️ `kimi-k2.6-vl` **不在本表**：它是视觉（VL）模型，`parseModelInfo` 与
+ * `listAllModels` 现在共用大小写不敏感的 `isVisualModelId` 把它过滤掉，
+ * 它根本不会出现在模型菜单里，故无需窗口。（曾一度补过 262144，属多余，
+ * 2026-10-28 撤回。）
  */
 const CONTEXT_WINDOWS: ReadonlyMap<string, number> = new Map([
   ['GLM-5.2', 202752],
+  ['glm-5.3', 1_000_000],
   ['glm-5.3-flash', 1_048_576],
+  ['glm-5.2-sft-harmony', 202752],
+  ['openpangu-2.0-flash', 524_288],
+  ['openpangu-2.0-pro', 524_288],
+  ['kimi-k3', 1_000_000],
   ['deepseek-v4-flash', 1048576],
   ['deepseek-v4-pro', 1048576],
   ['deepseek-v4.1-flash', 1_000_000],
@@ -955,10 +990,10 @@ export class CodeArtsAdapter extends LlmAdapter {
    */
   listAllModels(): readonly { id: string; name: string }[] {
     const source = this.remoteModels ?? DEFAULT_MODELS.map((id) => ({ id, name: id }))
-    // 与 listModels 保持同一套「可见性」过滤（VL 多模态不参与），
+    // 与 parseModelInfo 共用同一个判据（大小写不敏感），避免两处口径漂移。
     // 唯一区别是不套用户黑名单。
     return source
-      .filter((m) => !/-VL-/i.test(m.id) && !/-VL$/i.test(m.id))
+      .filter((m) => !isVisualModelId(m.id))
       .map((m) => ({ id: m.id, name: m.name }))
   }
 
@@ -1147,20 +1182,23 @@ export class CodeArtsAdapter extends LlmAdapter {
     // 因限流已尝试过的账号 id：保证每个账号只试一次，试完才判定"全部受限"。
     const rateLimitTried = new Set<string>()
     if (currentAccountId) rateLimitTried.add(currentAccountId)
-    // benefit（免费额度）模型判定在重试循环外先算好：它要读 benefit 集合缓存
-    // （`~/.cache/deveco/codearts_benefit_models.json`），不宜每轮重试都做 IO。
-    // 集合来自 gateway/config 的模型清单 ∪ 静态兜底（见 isCodeArtsBenefitModel），
-    // 使后端新增 benefit 模型时无需改代码即可自动识别。
+    // benefit（免费额度）模型判定在重试循环外先算好，不宜每轮重试都算。
+    // ⚠️ 2026-10-28 起该判定只查静态表且表为空（免费权益通道已下线，见
+    // `isCodeArtsBenefitModel` 与 `CODEARTS_BENEFIT_FALLBACK` 的注释）——
+    // 于是这里恒为 false，不再多发 `maas_type`。判定与下方的重试分支**刻意
+    // 保留**：华为若重开通道，把模型 id 填回兜底表即可恢复，无需回滚代码。
     const isBenefitModel = isCodeArtsBenefitModel(options.model)
     for (;;) {
-      // benefit（免费额度）模型（glm-5.3-flash、deepseek-v4.1-flash 等）后端要求
-      // maas_type: benefit 头参与 SDK-HMAC-SHA256 签名，否则返回
+      // benefit（免费额度）模型（历史上是 glm-5.3-flash、deepseek-v4.1-flash 等）
+      // 曾要求 `maas_type: benefit` 头参与 SDK-HMAC-SHA256 签名，否则返回
       // InferHub.002002009.404 "model is not registered"。
       //
-      // 判定必须是**动态**的：早期只硬编码 glm-5.3-flash 一个模型，导致
-      // deepseek-v4.1-flash 等其它 benefit 模型调用失败（用户报障：
-      // 发消息后报 Insufficient Balance / QUOTA —— 缺该头时后端按非 benefit
-      // 通道处理该模型）。实证见 CODEARTS_BENEFIT_FALLBACK 注释。
+      // ⚠️ 通道下线后该头**反而导致失败**。真实复测（2026-10-28，本机账号）：
+      //   glm-5.3 不带 maas_type → 200 正常出流
+      //   glm-5.3 带 maas_type   → 200 + InferHub.4004.200 "benefit not found"
+      // 故默认不再发送；`isBenefitModel` 为 false 时 `extraSignedHeaders`
+      // 恒为 undefined。保有该分支是为了通道重开时能零改动恢复，且下方
+      // 「benefit not found → 去掉该头重试一次」的自愈路径对任何残留配置都有效。
       const extraSignedHeaders = isBenefitModel && !benefitHeaderDropped ? { maas_type: 'benefit' } : undefined
       const signed = await signRequestHuawei(
         credential.access_key_id,
@@ -1239,10 +1277,15 @@ export class CodeArtsAdapter extends LlmAdapter {
           } else if (
             error instanceof LlmError
             && error.code === BENEFIT_NOT_FOUND_CODE
-            && isBenefitModel
             && !benefitHeaderDropped
           ) {
-            // 该账号没有 benefit 包：去掉 maas_type 头重试一次
+            // 该账号/该模型没有 benefit 包：去掉 `maas_type` 头重试一次。
+            //
+            // ⚠️ 条件里**刻意不再要求 `isBenefitModel`**（2026-10-28 修正）：
+            // 兜底表清空后 `isBenefitModel` 恒为 false，若仍把它作为前置条件，
+            // 这个自愈分支就是**死代码** —— 真收到 `benefit not found` 时只会
+            // 把错误抛给用户。而该错误本身就是「本次请求带了 maas_type」的
+            // 直接证据，无需再旁证；`benefitHeaderDropped` 已保证只重试一次。
             benefitHeaderDropped = true
             continue
           } else {

@@ -3,8 +3,18 @@ import { signRequestHuawei } from './sign.js'
 import type { CodeArtsCredential } from './types.js'
 
 /**
- * opengw 网关配置端点 — 返回 benefit（免费额度）模型列表（glm-5.3-flash 等）。
+ * opengw 网关配置端点 — 曾返回 benefit（免费额度）模型列表（glm-5.3-flash 等）。
  * 逆向自 CodeArts Agent IDE mitmproxy 抓包（2026-08）。
+ *
+ * ⚠️ **自 2026-10 起已失效，不再请求**（见 {@link fetchCodeArtsRemoteModels}）。
+ * 上游关闭免费权益通道后，该端点恒返回 HTTP 200 +
+ * `{"error_code":"4000","error_msg":"invalid channel, group not found"}`
+ * （`result` 为 null）。实测同一通道上的兄弟端点一并失效：
+ * `/api/v1/user/tokens/balance` 同样 4000、`/v1/benefit-gateway-config` 直接
+ * APIG.0101「API does not exist」。改参数（channel / group 各种组合）与
+ * 改请求头均无效 —— 不是我们调错，是通道整体下线。
+ *
+ * 保留常量仅为文档与回归排查留证；正常路径不应再引用它发请求。
  */
 export const OPENGW_GATEWAY_CONFIG_URL = 'https://opengw.developer.huaweicloud.com/api/v1/gateway/config'
 
@@ -31,25 +41,38 @@ const CODEARTS_BENEFIT_CACHE_FILENAME = 'codearts_benefit_models.json'
 /**
  * 远端不可用时的 benefit 模型兜底集合。
  *
- * **为什么需要它**：benefit 模型调用必须带 `maas_type: benefit`（参与
- * SDK-HMAC-SHA256 签名），否则后端返回
- * `InferHub.002002009.404 The model is not registered`。该集合的权威来源是
- * `opengw gateway/config` 的 `result.models`（见 {@link fetchCodeArtsRemoteModels}），
- * 但首次启动、未登录或远端拉取失败时拿不到，故保留一份兜底。
+ * ## ⚠️ 当前为空，这是刻意的（2026-10-28）
  *
- * 实证（2026-09-23，对齐 deveco-code-rust fb1b4a2）：
- * 1. IDE kernel 日志的 `inferhub-provider [header-debug] full headers` 显示
- *    `deepseek-v4.1-flash` 的实际出站请求带 `"maas_type":"benefit"`；
- * 2. 逐个对照两个端点的模型：`gateway/config` 的模型（glm-5.3-flash、
- *    deepseek-v4.1-flash 等）不带该头一律 404 not registered、带上即成功；
- *    而 `/v1/model/builtin` 的模型（GLM-5.2 等）带上反而 `unsupported model`。
+ * 2026-10 上游关闭免费权益（benefit）通道后，码道**只剩积分通道**：目录里
+ * 每个模型都带 `credit[].ratio_display`，按积分真实扣费，不再有免费额度模型。
+ * 此时再给模型带 `maas_type: benefit` 会被上游**明确拒绝**。真实复测
+ * （2026-10-28，本机账号）：
  *
- * ⚠️ `deepseek-v4-flash` / `deepseek-v4-pro`（无日期后缀）**不在**此集合：
+ * | 请求 | 结果 |
+ * |---|---|
+ * | `glm-5.3` 不带 `maas_type` | 200，正常出流 |
+ * | `glm-5.3` 带 `maas_type: benefit` | 200 + `InferHub.4004.200 benefit not found` |
+ *
+ * 而旧实现的兜底集合里正好有 `glm-5.3-flash` / `deepseek-v4.1-flash`，于是
+ * **每个 benefit 模型的请求都固定先带错头失败一次**，再由
+ * `llm-adapter.ts` 的 `benefitHeaderDropped` 去掉该头重试才成功 —— 白花一次
+ * 往返。账本实证：`codearts` 87 次成功请求里记着 235 条 `HTTP 400` attempt。
+ *
+ * 故清空此表，令 {@link isCodeArtsBenefitModel} 恒为 false。**判定逻辑本身
+ * 保留**（含 `benefit not found` 的一次性重试）：华为若重开活动，只需把模型
+ * id 填回这里，无需回滚代码。
+ *
+ * ## 历史实证（通道仍在时有效，留作协议参考）
+ *
+ * benefit 模型调用必须带 `maas_type: benefit`（参与 SDK-HMAC-SHA256 签名），
+ * 否则后端返回 `InferHub.002002009.404 The model is not registered`。该集合
+ * 的权威来源曾是 `opengw gateway/config` 的 `result.models`（现已失效，见
+ * {@link OPENGW_GATEWAY_CONFIG_URL}）。
+ *
+ * ⚠️ `deepseek-v4-flash` / `deepseek-v4-pro`（无日期后缀）从来**不在**此集合：
  * 它们是后端另外注册的非 benefit 模型，带上 maas_type 会报 unsupported model。
- * 尤其注意 gateway/config 返回的是它们的**带日期后缀**形态
- * （`deepseek-v4-flash-0731`），归一化后落到这两个 id —— 绝不能连带标成 benefit。
  */
-export const CODEARTS_BENEFIT_FALLBACK: readonly string[] = ['glm-5.3-flash', 'deepseek-v4.1-flash']
+export const CODEARTS_BENEFIT_FALLBACK: readonly string[] = []
 
 /** 动态模型拉取超时（ms）。 */
 const FETCH_TIMEOUT_MS = 10_000
@@ -113,7 +136,14 @@ export function parseModelInfo(m: Record<string, unknown>, seen: Set<string>): R
   // 过滤视觉（VL）多模态模型
   // id 含 -VL- 或以 -VL 结尾（如 Qwen3-VL-235B），上下文小、不支持工具调用，
   // 不适合当 agent 主模型，从列表隐藏；只通过 analyzeImage 等工具间接调用。
-  if (id.includes('-VL-') || id.endsWith('-VL')) return undefined
+  //
+  // ⚠️ **必须大小写不敏感**（2026-10-28 修正）：实测码道目录里有
+  // `kimi-k2.6-vl`（全小写），旧判据只认大写 `-VL` / `-VL-`，于是它通过了
+  // 本函数 —— 与 `llm-adapter.ts` 的 `listAllModels`（那里用了 `/i`）判据
+  // 不一致。虽然 `listAllModels` 兜住了最终菜单，但任何**直接用本函数产物**
+  // 的调用方（如 `availableCodeArtsModels()`）都会把小写 VL 模型放进来。
+  // 判据统一为大小写不敏感，两处口径一致。
+  if (isVisualModelId(id)) return undefined
   const rawName = m['model_name']
   const name = typeof rawName === 'string' && rawName.length > 0 ? normalizeModelId(rawName) : id
   if (seen.has(id)) return undefined
@@ -139,6 +169,30 @@ export function parseModelInfo(m: Record<string, unknown>, seen: Set<string>): R
 function positiveInt(value: unknown): number | undefined {
   const n = typeof value === 'string' ? Number(value) : value
   return typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.trunc(n) : undefined
+}
+
+/**
+ * 判断模型 id 是否为视觉（VL）多模态模型。
+ *
+ * 视觉模型上下文小、不支持工具调用，不适合当 agent 主模型，故一律从目录
+ * 中隐藏（只通过 analyzeImage 等工具间接调用）。
+ *
+ * ## 为什么抽成函数
+ *
+ * 判据原本在 `models.ts` 的 `parseModelInfo` 与 `llm-adapter.ts` 的
+ * `listAllModels` **各写一遍**，而且口径不同：前者只认大写 `-VL` / `-VL-`，
+ * 后者用了 `/i`。实测码道目录有全小写的 `kimi-k2.6-vl` —— 结果一处放行、
+ * 另一处拦截，最终菜单虽然正确，但 `parseModelInfo` 的产物（如
+ * `availableCodeArtsModels()`）会漏进小写 VL 模型。
+ *
+ * 现在只有这一个实现，两处共用，**大小写不敏感**。新增调用方请直接引用它，
+ * 不要再复制判据。
+ *
+ * @param id - 模型 id（大小写不限）。
+ * @returns 命中 `-VL-` 或以 `-VL` 结尾时为 true。
+ */
+export function isVisualModelId(id: string): boolean {
+  return /-VL-/i.test(id) || /-VL$/i.test(id)
 }
 
 /** 从 JSON 响应中沿路径指针取数组。 */
@@ -190,13 +244,23 @@ async function fetchSignedGet(
 }
 
 /**
- * 从两个远端端点拉取模型列表并合并去重：
- * 1. opengw gateway/config → result.models（benefit 模型）
- * 2. snap-access /v1/model/builtin → builtinModels（常规模型）
- * 失败或空凭据时返回空数组（不阻断）。
+ * 从远端端点拉取模型列表并合并去重。
  *
- * 同时把 gateway/config 下发的 benefit 模型 id 集合写入独立缓存
- * （见 {@link saveBenefitCache}），供 chat 请求判定是否带 `maas_type: benefit`。
+ * ## 当前只有一个端点（2026-10-28 起）
+ *
+ * `snap-access /v1/model/builtin` → `builtinModels`（全部现存模型）。
+ *
+ * 此处**不再**请求 `opengw gateway/config`：该端点为 benefit（免费额度）模型
+ * 清单服务，随免费权益通道于 2026-10 下线，恒返回
+ * `4000 invalid channel, group not found`（详见
+ * {@link OPENGW_GATEWAY_CONFIG_URL}）。每次刷新都白打一次必然失败的请求，
+ * 也拿不到任何模型。
+ *
+ * 连带影响：benefit id 集合不再由远端填充，改由
+ * {@link CODEARTS_BENEFIT_FALLBACK}（当前为空）决定，见
+ * {@link isCodeArtsBenefitModel}。
+ *
+ * 失败或空凭据时返回空数组（不阻断）。
  */
 export async function fetchCodeArtsRemoteModels(
   credential: CodeArtsCredential,
@@ -207,38 +271,8 @@ export async function fetchCodeArtsRemoteModels(
 
   const models: RemoteModel[] = []
   const seen = new Set<string>()
-  // 来自 gateway/config 的 benefit 模型 id —— 调用时必须带 maas_type: benefit。
-  //
-  // ⚠️ 只记录**未被去掉日期后缀**的 id（即 chat 请求真正发出的那个 id）。
-  // 原因：normalizeModelId 会把 gateway 的 `deepseek-v4-flash-0731` 改写成
-  // `deepseek-v4-flash`，而两者在后端是**不同模型**、benefit 属性相反
-  // （实测：`-0731` 不带 maas_type → 404；无后缀的不带 → 成功、带上 →
-  // `unsupported model`）。记录被改写过的 id 会把无后缀模型错误标记为
-  // benefit，导致它反而调用失败。既然该 id 我们根本不发送，它也就无从
-  // 决定我们发送的 id 的 benefit 属性。
-  const benefitIds: string[] = []
 
-  // 1. opengw gateway/config — benefit 模型（glm-5.3-flash 等）
-  const gatewayText = await fetchSignedGet(fetcher, OPENGW_GATEWAY_CONFIG_URL, ak, sk, st)
-  if (gatewayText !== undefined) {
-    const arr = extractJsonArray(gatewayText, ['result', 'models'])
-    if (arr !== undefined) {
-      for (const item of arr) {
-        if (typeof item === 'object' && item !== null) {
-          const entry = item as Record<string, unknown>
-          const rawId = typeof entry['model_id'] === 'string' ? entry['model_id'] : ''
-          const mi = parseModelInfo(entry, seen)
-          if (mi) {
-            // 仅当归一化未改写 id 时才记为 benefit（见上方说明）
-            if (rawId.length > 0 && normalizeModelId(rawId) === rawId) benefitIds.push(mi.id)
-            models.push(mi)
-          }
-        }
-      }
-    }
-  }
-
-  // 2. snap-access /v1/model/builtin — 常规模型（GLM-5.2、openpangu、glm-5.2-sft-harmony 等）
+  // snap-access /v1/model/builtin — 现存全部模型（GLM-5.2、glm-5.3、openpangu 等）
   //    Agent-Type: PromptCenter + X-Language: zh-cn（不参与签名）。
   //    替代旧 statistics/plugin（已不再返回 model_metrics）。
   const snapText = await fetchSignedGet(fetcher, SNAP_MODEL_BUILTIN_URL, ak, sk, st, {
@@ -258,22 +292,18 @@ export async function fetchCodeArtsRemoteModels(
     }
   }
 
-  // 持久化 benefit 集合：chat 请求签名时据此决定是否带 maas_type。
-  // 仅在确实从 gateway 拿到模型时写入，避免把空集合覆盖掉可用缓存。
-  if (benefitIds.length > 0) {
-    setBenefitMemoryCache(benefitIds)
-    saveBenefitCache(benefitIds)
-  }
-
   return models
 }
 
 /**
  * 缓存目录：默认 `~/.cache/deveco`，可用 `DSH_CODEARTS_CACHE_DIR` 覆盖
  * （单测借此隔离，避免污染真实用户缓存）。
+ *
+ * @param directory - 缓存目录；传 `undefined` 表示**关闭磁盘缓存**（不读不写），
+ *   单测收尾时用它将状态复位，避免上一个用例的缓存目录泄漏到下一个用例。
  */
 let hubCache:string|undefined
-export function configureHubCache(directory:string):void {hubCache=directory;memoryCache=undefined;benefitMemoryCache=undefined;}
+export function configureHubCache(directory:string|undefined):void {hubCache=directory;memoryCache=undefined;benefitMemoryCache=undefined;}
 function cacheDir():string|undefined {return hubCache}
 
 
@@ -348,10 +378,12 @@ export function setMemoryCache(models: RemoteModel[] | undefined): void {
 
 /**
  * 保存 benefit 模型 id 集合到缓存文件（原子写入 tmp+rename）。
- * 文件不存在或写入失败时静默忽略 —— 判定会回退到静态兜底集合。
  *
- * 同步写入（与 {@link loadBenefitCache} 一致）：chat 请求签名前要读它，
- * 异步写入会让「刚拉取完就发消息」的窗口期内读到旧值/空值。
+ * ⚠️ **当前无调用方，保留仅为后备**（2026-10-28）：写入方曾是
+ * `fetchCodeArtsRemoteModels` 的 gateway/config 分支，该端点下线后已移除。
+ * 若将来恢复 benefit 通道（填回 {@link CODEARTS_BENEFIT_FALLBACK} 或重新接
+ * 远端清单），可由写入方调用本函数与 {@link setBenefitMemoryCache}；届时
+ * {@link isCodeArtsBenefitModel} 也需相应改回读取缓存。
  */
 export function saveBenefitCache(ids: readonly string[]): void {
   const path = benefitCachePath()
@@ -367,7 +399,14 @@ export function saveBenefitCache(ids: readonly string[]): void {
   }
 }
 
-/** 加载缓存文件中的 benefit 模型 id 集合；文件不存在或解析失败时返回 undefined。 */
+/**
+ * 加载缓存文件中的 benefit 模型 id 集合；文件不存在或解析失败时返回 undefined。
+ *
+ * ⚠️ **当前无调用方，保留仅为后备**：该文件的唯一写入方是已下线的
+ * gateway/config 分支，用户机器上残留的旧文件记录的是通道关闭前的历史模型。
+ * {@link isCodeArtsBenefitModel} **刻意不再读它** —— 让一份死数据继续决定
+ * 是否发 `maas_type` 正是坏处所在。用途仅限日后恢复通道时的人工排查/迁移。
+ */
 export function loadBenefitCache(): string[] | undefined {
   const path = benefitCachePath()
   if (!path) return undefined
@@ -382,24 +421,34 @@ export function loadBenefitCache(): string[] | undefined {
   }
 }
 
-/** 设置 benefit 集合内存缓存（由远端拉取成功后调用；undefined 表示清除）。 */
+/**
+ * 设置 benefit 集合内存缓存（undefined 表示清除）。
+ *
+ * ⚠️ **当前无调用方，保留仅为后备**：见 {@link saveBenefitCache}。
+ */
 export function setBenefitMemoryCache(ids: string[] | undefined): void {
   benefitMemoryCache = ids
 }
 
 /**
- * 判断某模型是否为 benefit（免费额度）模型 —— 决定 chat 请求是否必须带
+ * 判断某模型是否为 benefit（免费额度）模型 —— 决定 chat 请求是否带
  * `maas_type: benefit`。
  *
- * 优先级：内存缓存 → 磁盘缓存（远端拉取所得）→ 静态兜底集合。
- * 远端集合优先，使后端新增 benefit 模型时**无需改代码**即可自动识别。
+ * ## 现在只看静态表，且该表为空（2026-10-28）
+ *
+ * 旧实现按「内存缓存 → 磁盘缓存（远端拉取所得）→ 静态兜底」三级判定。远端那
+ * 一级随 `gateway/config` 下线后已无写入方，**磁盘上的旧缓存文件却会永久留在
+ * 用户机器上**：它记录的是通道关闭前的历史模型，继续读它等于让一份死数据
+ * 长期决定是否发 `maas_type`。故这里不再读缓存，只看
+ * {@link CODEARTS_BENEFIT_FALLBACK}（当前为空 → 恒 false）。
  *
  * ⚠️ 判定**不是**「名字里带 flash」这类猜测：`deepseek-v4-flash`（无后缀）
- * 与 `glm-5.3-flash` 名字形态相同，benefit 属性却相反。唯一权威来源是
- * gateway/config 的模型清单 + 兜底表。
+ * 与 `glm-5.3-flash` 名字形态相同，benefit 属性却曾相反。当年唯一权威来源是
+ * gateway/config 的模型清单 + 兜底表；前者已失效，只剩兜底表。
+ *
+ * 后备：华为若重开免费权益通道，把模型 id 填回 {@link CODEARTS_BENEFIT_FALLBACK}
+ * 即可恢复发头，`llm-adapter.ts` 的 `benefit not found` 一次性重试逻辑仍在。
  */
 export function isCodeArtsBenefitModel(model: string): boolean {
-  if (benefitMemoryCache === undefined) benefitMemoryCache = loadBenefitCache()
-  if (benefitMemoryCache !== undefined && benefitMemoryCache.includes(model)) return true
   return CODEARTS_BENEFIT_FALLBACK.includes(model)
 }

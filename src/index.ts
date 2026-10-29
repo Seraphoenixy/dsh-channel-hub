@@ -19,9 +19,11 @@ import {
   purgeAccountSnapshots,
 } from "./core/account-cleanup.ts";
 import { createDrivers } from "./drivers/ofm.js";
+import { installSessionModelIsolation } from "./host/session-model.ts";
 export const name = "channel-hub";
 export const inject = ["llm", "credentials"];
 export async function apply(ctx: any) {
+  installSessionModelIsolation(ctx);
   const profile = ctx.get?.("profileContext") ?? {};
   const home = process.env.DSH_HOME ?? join(homedir(), ".dsh");
   const profileName = profile.name ?? process.env.DSH_PROFILE ?? "desktop";
@@ -342,6 +344,66 @@ export async function apply(ctx: any) {
       return true;
     }
     if (method === "models.refresh") {
+      /**
+       * 不点名 `provider` ⇒ 更新**全部渠道**（区块工具条的「更新模型」）。
+       *
+       * ⚠️ 用 `Promise.allSettled` 而不是 `all`：一个渠道的目录请求抛错（驱动
+       * 异常）不该让其余渠道的目录都白刷。
+       *
+       * ⚠️ **还要看快照里的 `error`**：`driver.reload()` 内部对每个账号调
+       * `catalog.refresh`，它把上游失败**吞成** `{...previous, stale, error}`
+       * 的快照并正常 resolve —— 只看 `rejected` 会把「所有渠道目录都 500」
+       * 报成「全部更新成功」。这正是界面最需要说清的场合，故两路都收。
+       *
+       * ⚠️ **没有账号的渠道不算「已更新」**（2026-10-29 修）。`reload()` 对
+       * 空账号列表返回 `[]`，它既没失败也没做事；旧实现把它计进 `refreshed`，
+       * 于是 9 个渠道里 7 个没账号时界面显示「已更新 8/9」——用户点完看不到
+       * 任何变化，还以为按钮坏了。现在这类渠道单列成 `skipped`。
+       */
+      if (p.provider === undefined || p.provider === null) {
+        const targets = [...engine.drivers.values()].filter(
+          (d: any) => !d.error && d.reload,
+        );
+        const settled = await Promise.allSettled(
+          targets.map((d: any) => d.reload()),
+        );
+        const failures: string[] = [];
+        const skipped: string[] = [];
+        let refreshed = 0;
+        settled.forEach((result: any, i: number) => {
+          const id = targets[i].id;
+          if (result.status === "rejected") {
+            failures.push(id + "：" + redact(result.reason));
+            return;
+          }
+          const snapshots = Array.isArray(result.value) ? result.value : [];
+          /**
+           * 空数组 = 该渠道没有账号可刷（不是成功，也不是失败）。用
+           * `reload()` 的返回值判定，而不是另外数一遍账号：两者若各算一次，
+           * 「账号刚被删掉」这类并发时序就会让它们对不上。
+           */
+          if (snapshots.length === 0) {
+            skipped.push(id);
+            return;
+          }
+          const failed = snapshots.filter((s: any) => s?.error);
+          if (failed.length > 0) {
+            failures.push(
+              id +
+                "：" +
+                [...new Set(failed.map((s: any) => redact(s.error)))].join("；"),
+            );
+            return;
+          }
+          refreshed++;
+        });
+        // 全部失败才抛错；部分失败只报告，成功的渠道照常更新。
+        if (failures.length === targets.length && targets.length > 0)
+          throw Error("全部渠道目录更新失败：" + failures.join("；"));
+        // ⚠️ 目录快照变了 ⇒ 模型菜单必须重读，否则界面显示新目录、菜单还是旧的。
+        ctx.emit("llm/adapters-updated");
+        return { refreshed, failures, skipped, total: targets.length };
+      }
       const d = engine.drivers.get(p.provider);
       if (!d?.reload) throw Error(d?.error ?? "Unknown channel");
       return d.reload();
@@ -500,15 +562,7 @@ export async function apply(ctx: any) {
     };
     stopWatch = watchPackage(distDir, {
       logger: ctx.logger,
-      filter: (file) => {
-        const normalized = file.replaceAll("\\", "/");
-        return (
-          normalized === "index.js" ||
-          normalized === "ledger-worker.js" ||
-          normalized.endsWith("/index.js") ||
-          normalized.endsWith("/ledger-worker.js")
-        );
-      },
+      filter: isWatchedArtifact,
       onChange: reloadFromDisk,
     });
     if (typeof ctx.effect === "function") ctx.effect(() => stopWatch);
@@ -528,6 +582,32 @@ export async function apply(ctx: any) {
     await store.close();
   };
   return Object.assign(stop, { dispatch, stop });
+}
+/**
+ * 哪些 `dist/` 产物值得触发一次热重载。
+ *
+ * ⚠️ `client.js` **必须在列表里**（2026-10-29 补）。原先只监视 `index.js` 与
+ * `ledger-worker.js`，于是「只改界面」的一次构建完全不触发任何通知 —— 排查
+ * 「改完了但没生效」时，日志里连一条「dist 已更新」都不会出现，看不出该刷新
+ * 页面。浏览器侧的样式与组件**只**来自 `client.js`；它由宿主按请求从磁盘读
+ * （`frontend-static` 的 `serveStatic` 里是 `readFile`，且响应带
+ * `cache-control: no-store`），所以刷新本来就能拿到新产物 —— 但把这件事说
+ * 出来（一条日志）才是可诊断的。
+ *
+ * 抽成具名函数是为了能被 `tests/reload.test.ts` 直接断言：写在 `apply` 里的
+ * 内联箭头函数，测试只能复刻一份逻辑，而复刻的那份永远不会和真实代码一起腐烂。
+ */
+export function isWatchedArtifact(file: string): boolean {
+  const normalized = file.replaceAll("\\", "/");
+  /**
+   * 只认**文件名**，不认路径前缀：`watchPackage` 给的可能是相对路径
+   * （`index.js`）也可能是绝对路径（`D:/proj/dist/index.js`）。
+   * `client.js` 单独列出而不是用 `/\.js$/`：`qoder-auth-wasm.wasm` 之类
+   * 不该重复触发，`.map`（开启 sourcemap 时）也不该算一次构建完成。
+   */
+  return ["index.js", "ledger-worker.js", "client.js"].some(
+    (name) => normalized === name || normalized.endsWith("/" + name),
+  );
 }
 export function validateFilter(p: any): Filter {
   const out: Filter = {};

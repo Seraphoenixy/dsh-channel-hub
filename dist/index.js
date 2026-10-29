@@ -4307,11 +4307,9 @@ ${canonicalHash}`;
 }
 
 // vendor/ofm/src/models.ts
-var OPENGW_GATEWAY_CONFIG_URL = "https://opengw.developer.huaweicloud.com/api/v1/gateway/config";
 var SNAP_MODEL_BUILTIN_URL = "https://snap-access.cn-north-4.myhuaweicloud.com/v1/model/builtin";
 var CODEARTS_MODELS_CACHE_FILENAME = "codearts_models.json";
-var CODEARTS_BENEFIT_CACHE_FILENAME = "codearts_benefit_models.json";
-var CODEARTS_BENEFIT_FALLBACK = ["glm-5.3-flash", "deepseek-v4.1-flash"];
+var CODEARTS_BENEFIT_FALLBACK = [];
 var FETCH_TIMEOUT_MS = 1e4;
 var MODEL_REFRESH_INTERVAL_MS = 2 * 36e5;
 var memoryCache;
@@ -4329,7 +4327,7 @@ function parseModelInfo(m, seen) {
   const rawId = m["model_id"];
   if (typeof rawId !== "string" || rawId.length === 0) return void 0;
   const id = normalizeModelId(rawId);
-  if (id.includes("-VL-") || id.endsWith("-VL")) return void 0;
+  if (isVisualModelId(id)) return void 0;
   const rawName = m["model_name"];
   const name2 = typeof rawName === "string" && rawName.length > 0 ? normalizeModelId(rawName) : id;
   if (seen.has(id)) return void 0;
@@ -4350,6 +4348,9 @@ function parseModelInfo(m, seen) {
 function positiveInt(value) {
   const n = typeof value === "string" ? Number(value) : value;
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.trunc(n) : void 0;
+}
+function isVisualModelId(id) {
+  return /-VL-/i.test(id) || /-VL$/i.test(id);
 }
 function extractJsonArray(text3, path) {
   try {
@@ -4389,24 +4390,6 @@ async function fetchCodeArtsRemoteModels(credential, fetcher = fetch) {
   if (!ak || !sk) return [];
   const models = [];
   const seen = /* @__PURE__ */ new Set();
-  const benefitIds = [];
-  const gatewayText = await fetchSignedGet(fetcher, OPENGW_GATEWAY_CONFIG_URL, ak, sk, st);
-  if (gatewayText !== void 0) {
-    const arr = extractJsonArray(gatewayText, ["result", "models"]);
-    if (arr !== void 0) {
-      for (const item of arr) {
-        if (typeof item === "object" && item !== null) {
-          const entry = item;
-          const rawId = typeof entry["model_id"] === "string" ? entry["model_id"] : "";
-          const mi = parseModelInfo(entry, seen);
-          if (mi) {
-            if (rawId.length > 0 && normalizeModelId(rawId) === rawId) benefitIds.push(mi.id);
-            models.push(mi);
-          }
-        }
-      }
-    }
-  }
   const snapText = await fetchSignedGet(fetcher, SNAP_MODEL_BUILTIN_URL, ak, sk, st, {
     "Content-Type": "application/json",
     "Agent-Type": "PromptCenter",
@@ -4423,10 +4406,6 @@ async function fetchCodeArtsRemoteModels(credential, fetcher = fetch) {
       }
     }
   }
-  if (benefitIds.length > 0) {
-    setBenefitMemoryCache(benefitIds);
-    saveBenefitCache(benefitIds);
-  }
   return models;
 }
 var hubCache;
@@ -4441,10 +4420,6 @@ function cacheDir() {
 function modelsCachePath() {
   const dir = cacheDir();
   return dir === void 0 ? void 0 : `${dir}/${CODEARTS_MODELS_CACHE_FILENAME}`;
-}
-function benefitCachePath() {
-  const dir = cacheDir();
-  return dir === void 0 ? void 0 : `${dir}/${CODEARTS_BENEFIT_CACHE_FILENAME}`;
 }
 function saveModelsCache(models) {
   const path = modelsCachePath();
@@ -4461,37 +4436,7 @@ function saveModelsCache(models) {
 function setMemoryCache(models) {
   memoryCache = models;
 }
-function saveBenefitCache(ids) {
-  const path = benefitCachePath();
-  if (!path) return;
-  const dir = path.slice(0, path.lastIndexOf("/"));
-  try {
-    mkdirSync3(dir, { recursive: true });
-    const tmp = path + ".tmp";
-    writeFileSync3(tmp, JSON.stringify(ids), "utf-8");
-    renameSync3(tmp, path);
-  } catch {
-  }
-}
-function loadBenefitCache() {
-  const path = benefitCachePath();
-  if (!path) return void 0;
-  try {
-    if (!existsSync3(path)) return void 0;
-    const text3 = readFileSync3(path, "utf-8");
-    const ids = JSON.parse(text3);
-    if (!Array.isArray(ids) || ids.length === 0) return void 0;
-    return ids.filter((id) => typeof id === "string");
-  } catch {
-    return void 0;
-  }
-}
-function setBenefitMemoryCache(ids) {
-  benefitMemoryCache = ids;
-}
 function isCodeArtsBenefitModel(model) {
-  if (benefitMemoryCache === void 0) benefitMemoryCache = loadBenefitCache();
-  if (benefitMemoryCache !== void 0 && benefitMemoryCache.includes(model)) return true;
   return CODEARTS_BENEFIT_FALLBACK.includes(model);
 }
 
@@ -5463,7 +5408,12 @@ var DEFAULT_MODELS = [
 ];
 var CONTEXT_WINDOWS = /* @__PURE__ */ new Map([
   ["GLM-5.2", 202752],
+  ["glm-5.3", 1e6],
   ["glm-5.3-flash", 1048576],
+  ["glm-5.2-sft-harmony", 202752],
+  ["openpangu-2.0-flash", 524288],
+  ["openpangu-2.0-pro", 524288],
+  ["kimi-k3", 1e6],
   ["deepseek-v4-flash", 1048576],
   ["deepseek-v4-pro", 1048576],
   ["deepseek-v4.1-flash", 1e6]
@@ -5909,7 +5859,7 @@ var CodeArtsAdapter = class extends LlmAdapter {
    */
   listAllModels() {
     const source = this.remoteModels ?? DEFAULT_MODELS.map((id) => ({ id, name: id }));
-    return source.filter((m) => !/-VL-/i.test(m.id) && !/-VL$/i.test(m.id)).map((m) => ({ id: m.id, name: m.name }));
+    return source.filter((m) => !isVisualModelId(m.id)).map((m) => ({ id: m.id, name: m.name }));
   }
   async listModels(_provider) {
     if (!await providerCatalogVisible(this.options.accountPool, PROVIDER)) return [];
@@ -6076,7 +6026,7 @@ var CodeArtsAdapter = class extends LlmAdapter {
             throw new LlmError2(message, QUOTA_EXCEEDED_CODE, { status: 200 });
           }
           if (error instanceof SseQueueRetryError) {
-          } else if (error instanceof LlmError2 && error.code === BENEFIT_NOT_FOUND_CODE && isBenefitModel && !benefitHeaderDropped) {
+          } else if (error instanceof LlmError2 && error.code === BENEFIT_NOT_FOUND_CODE && !benefitHeaderDropped) {
             benefitHeaderDropped = true;
             continue;
           } else {
@@ -23008,10 +22958,47 @@ async function createDrivers(ctx, { catalog, observer, store }) {
   };
 }
 
+// src/host/session-model.ts
+function installSessionModelIsolation(ctx) {
+  ctx.on("agent/created", ({ agent }) => {
+    const session = agent.session;
+    if (session.header?.origin === "subagent" || session.header?.parentSession) return;
+    const projections = ctx.get?.("sessionProjections");
+    const defaults = ctx.get?.("agentDefaultModel");
+    const state = projections?.stateOf(session, "modelSelection");
+    if (!defaults || !state || state.pending != null || session.requestHeader()) return;
+    const initial = { ...defaults.currentSelection() };
+    if (!initial.provider || !initial.model) return;
+    session.append("model/selection", initial);
+    let assembled;
+    const offAssembly = agent.ctx.on("system-prompt/assemble", async (assembly, context, next) => {
+      const pending = projections.stateOf(session, "modelSelection")?.pending;
+      const selected = !session.requestHeader() && pending != null ? { ...pending } : void 0;
+      const result = await next();
+      assembled = selected;
+      return selected ? {
+        ...result,
+        variables: { ...result.variables, provider: selected.provider, model: selected.model }
+      } : result;
+    }, { prepend: true });
+    const offRequest = agent.ctx.on("agent/request", async (_payload, next) => {
+      const result = await next();
+      if (!assembled) return result;
+      const { reasoningEffort: _effort, ...rest } = result;
+      return { ...rest, ...assembled };
+    }, { prepend: true });
+    ctx.effect(() => () => {
+      offAssembly();
+      offRequest();
+    });
+  });
+}
+
 // src/index.ts
 var name = "channel-hub";
 var inject = ["llm", "credentials"];
 async function apply(ctx) {
+  installSessionModelIsolation(ctx);
   const profile = ctx.get?.("profileContext") ?? {};
   const home = process.env.DSH_HOME ?? join7(homedir3(), ".dsh");
   const profileName = profile.name ?? process.env.DSH_PROFILE ?? "desktop";
@@ -23265,6 +23252,41 @@ async function apply(ctx) {
       return true;
     }
     if (method === "models.refresh") {
+      if (p.provider === void 0 || p.provider === null) {
+        const targets = [...engine.drivers.values()].filter(
+          (d2) => !d2.error && d2.reload
+        );
+        const settled = await Promise.allSettled(
+          targets.map((d2) => d2.reload())
+        );
+        const failures = [];
+        const skipped = [];
+        let refreshed = 0;
+        settled.forEach((result, i) => {
+          const id = targets[i].id;
+          if (result.status === "rejected") {
+            failures.push(id + "\uFF1A" + redact(result.reason));
+            return;
+          }
+          const snapshots = Array.isArray(result.value) ? result.value : [];
+          if (snapshots.length === 0) {
+            skipped.push(id);
+            return;
+          }
+          const failed = snapshots.filter((s) => s?.error);
+          if (failed.length > 0) {
+            failures.push(
+              id + "\uFF1A" + [...new Set(failed.map((s) => redact(s.error)))].join("\uFF1B")
+            );
+            return;
+          }
+          refreshed++;
+        });
+        if (failures.length === targets.length && targets.length > 0)
+          throw Error("\u5168\u90E8\u6E20\u9053\u76EE\u5F55\u66F4\u65B0\u5931\u8D25\uFF1A" + failures.join("\uFF1B"));
+        ctx.emit("llm/adapters-updated");
+        return { refreshed, failures, skipped, total: targets.length };
+      }
       const d = engine.drivers.get(p.provider);
       if (!d?.reload) throw Error(d?.error ?? "Unknown channel");
       return d.reload();
@@ -23394,10 +23416,7 @@ async function apply(ctx) {
     };
     stopWatch = watchPackage(distDir, {
       logger: ctx.logger,
-      filter: (file) => {
-        const normalized = file.replaceAll("\\", "/");
-        return normalized === "index.js" || normalized === "ledger-worker.js" || normalized.endsWith("/index.js") || normalized.endsWith("/ledger-worker.js");
-      },
+      filter: isWatchedArtifact,
       onChange: reloadFromDisk
     });
     if (typeof ctx.effect === "function") ctx.effect(() => stopWatch);
@@ -23418,6 +23437,12 @@ async function apply(ctx) {
   };
   return Object.assign(stop, { dispatch, stop });
 }
+function isWatchedArtifact(file) {
+  const normalized = file.replaceAll("\\", "/");
+  return ["index.js", "ledger-worker.js", "client.js"].some(
+    (name2) => normalized === name2 || normalized.endsWith("/" + name2)
+  );
+}
 function validateFilter(p) {
   const out = {};
   for (const k of ["provider", "accountId", "model", "outcome"])
@@ -23432,6 +23457,7 @@ function validateFilter(p) {
 export {
   apply,
   inject,
+  isWatchedArtifact,
   name,
   validateFilter
 };

@@ -93,6 +93,34 @@ window.__ModuleLoader__.load({
       ["#5b8def", "#2fa58a", "#d97757", "#8b6be0", "#3a9bd9", "#c05a5a"][
         [...id].reduce((n, ch) => n + ch.charCodeAt(0), 0) % 6
       ];
+    /**
+     * 「使用账号」下拉框的悬停全文。
+     *
+     * 下拉框用 `text-overflow:ellipsis` 收窄长昵称（原生 select 默认是在字形
+     * 中间硬切），全文只能靠悬停补回。文案与 `<option>` 的生成方式保持一致：
+     * 昵称 + 重名时的 id 尾号 + 停用标记 —— 两处拼接若各写一遍，悬停看到的
+     * 名字会和下拉项对不上。
+     */
+    const accountOptionLabel = (a: any, accounts: any[]) =>
+      (a.nickname || a.id) +
+      (a.nickname &&
+      accounts.filter((other: any) => other.nickname === a.nickname).length > 1
+        ? " · " + a.id.slice(-6)
+        : "") +
+      (a.enabled ? "" : "（已停用）");
+    const selectedOptionTitle = (c: any, accounts: any[]) => {
+      if (!c.selectedAccountId)
+        return "自动选择：该渠道按可用账号轮换，不会固定到某一个";
+      const account = accounts.find((a: any) => a.id === c.selectedAccountId);
+      // 指定的账号已被删除：下拉项是那条占位提示，悬停给同样的文字。
+      if (!account) return "指定账号已删除，请重新选择";
+      /**
+       * 「固定使用，不自动换号」这句原本是下拉框旁边的一行文字，2026-10-29
+       * 移到悬停说明里：它在卡片网格里永远放不下（见 `chub-account-choice`
+       * 那段说明），但信息本身是对的 —— 固定账号的渠道确实不会自动换号。
+       */
+      return accountOptionLabel(account, accounts) + "\n固定使用，不自动换号";
+    };
     const ago = (n: any) => {
       if (!n) return "未更新";
       const delta = Math.max(0, Date.now() - n);
@@ -165,6 +193,15 @@ window.__ModuleLoader__.load({
         page: 1,
       });
       const [busy, setBusy] = useState(false);
+      /** 「更新模型」（全部渠道）进行中的忙碌位，理由见 `refreshAllModels`。 */
+      const [refreshing, setRefreshing] = useState(false);
+      /**
+       * 中性结果提示（成功、或「没有可更新的渠道」）。
+       *
+       * ⚠️ 与 `error` 分开：`error` 走红色 `操作未完成`，而这些是**正常完成**
+       * 的结果说明。混用会让「全部成功」也顶着一条红条。
+       */
+      const [notice, setNotice] = useState("");
       const [authorization, setAuthorization] = useState(null as any);
       const [importRows, setImportRows] = useState(null as any);
       /**
@@ -272,6 +309,11 @@ window.__ModuleLoader__.load({
           setLogs(l);
           setHealth(health);
           setError("");
+          /**
+           * ⚠️ `notice` 不在这里清：它由 `refreshAllModels` 在 `load()` **之后**
+           * 写入（见那里的注释），而每 10 秒一次的自动刷新不该把用户刚看到的
+           * 「已更新 N/M」立刻抹掉。它只在用户发起下一次操作时被覆盖。
+           */
           return true;
         } catch (e) {
           setError(String(e));
@@ -328,6 +370,74 @@ window.__ModuleLoader__.load({
           setError(String(e));
         } finally {
           setBusy(false);
+        }
+      };
+      /**
+       * 更新**全部渠道**的动态模型目录（区块工具条的那一枚按钮）。
+       *
+       * 由宿主一次刷完（`models.refresh` 不带 `provider`）：目录属于渠道，
+       * 逐个渠道发 RPC 会让「中间某个失败」只能靠界面自己拼装，且每轮都要
+       * 重拉一次列表。宿主的分支用 `allSettled`，一个渠道的上游挂掉不影响
+       * 其余渠道。
+       *
+       * ⚠️ **必须给出可读的结果反馈**（2026-10-29 修）。旧实现只在有
+       * `failures` 时才写 `error`，全成功时界面**什么也不显示** —— 用户点完
+       * 按钮看不出发生没发生，于是报「按钮不能用」。现在统一写一条结果行：
+       * 成功几个、跳过几个（该渠道没有账号）、失败几个（点名原因）。
+       *
+       * ⚠️ 不用 `busy`：那一位由 `action` 在每次调用前后翻转，按钮会闪回可点。
+       * 这里自己维护 `refreshing`，并把按钮文案切成「更新中…」。
+       */
+      const refreshAllModels = async () => {
+        if (refreshing || channels.length === 0) return;
+        setRefreshing(true);
+        setError("");
+        setNotice("");
+        try {
+          const result: any = await rpc("models.refresh", {});
+          const failures: string[] = Array.isArray(result?.failures)
+            ? result.failures
+            : [];
+          const skipped: string[] = Array.isArray(result?.skipped)
+            ? result.skipped
+            : [];
+          const refreshed = Number(result?.refreshed ?? 0);
+          const total = Number(result?.total ?? channels.length);
+          const channelName = (id: string) =>
+            channels.find((c: any) => c.id === id)?.name ?? id;
+          /**
+           * ⚠️ **必须先 `load()` 再写结果**（真实缺陷，2026-10-29 修）。
+           *
+           * `load()` 内部会 `setError("")` —— 先把「操作未完成」清掉再重画列表。
+           * 旧实现把 `setError(失败信息)` 放在它**之前**，于是刚写进去的失败原因
+           * 立刻被 `load()` 抹掉：用户点完「更新模型」，目录确实刷了、有的渠道
+           * 也确实失败了，但界面**一条提示都没有** —— 这正是「按钮不能正常工作」
+           * 的实际观感。把结果写在本函数末尾（`load()` 之后）才不会被覆盖。
+           */
+          await load();
+          if (refreshed === 0 && failures.length === 0)
+            setNotice(
+              "没有可更新的渠道：已添加账号的渠道为 0" +
+                (skipped.length
+                  ? "（" +
+                    skipped.map(channelName).join("、") +
+                    " 还没有账号）"
+                  : "") +
+                "。",
+            );
+          else {
+            const parts = ["已更新 " + refreshed + "/" + total + " 个渠道"];
+            if (skipped.length)
+              parts.push("跳过 " + skipped.length + " 个（没有账号）");
+            if (failures.length) {
+              parts.push("失败 " + failures.length + " 个");
+              setError(parts.join("；") + "：" + failures.join("；"));
+            } else setNotice(parts.join("；") + "。");
+          }
+        } catch (e) {
+          setError(String(e));
+        } finally {
+          setRefreshing(false);
         }
       };
       const login = async (provider: string, mode?: "wechat" | "sms") => {
@@ -1128,6 +1238,12 @@ window.__ModuleLoader__.load({
             h("b", null, "操作未完成"),
             h("p", null, error),
           ),
+        notice &&
+          h(
+            "div",
+            { className: "chub-alert info", role: "status" },
+            h("p", null, notice),
+          ),
         authorization &&
           h(
             "div",
@@ -1292,11 +1408,28 @@ window.__ModuleLoader__.load({
                 h(
                   "div",
                   { className: "chub-sectools" },
+                  /**
+                   * 渠道级「更新模型」已上移到这里并**改为更新全部渠道**：
+                   * 目录属于渠道而不是某一张卡，逐卡点一次等于重复劳动。
+                   *
+                   * ⚠️ 与「旧账号导入」同为默认款式（非 `ghost`）：两者并排，
+                   * 一个描边一个无描边会看起来像是层级不同的两类操作。
+                   */
+                  btn(
+                    refreshing ? "更新中…" : "更新模型",
+                    refreshAllModels,
+                    {
+                      small: true,
+                      disabled: refreshing || channels.length === 0,
+                      title:
+                        "拉取全部渠道的动态模型目录（单个渠道失败不影响其余）",
+                    },
+                  ),
                   btn(
                     "旧账号导入",
                     async () =>
                       setImportRows(await action("migration.preview")),
-                    { kind: "ghost", small: true },
+                    { small: true },
                   ),
                 ),
               ),
@@ -1419,27 +1552,71 @@ window.__ModuleLoader__.load({
                           " 个账号",
                         ),
                       ),
+                      /**
+                       * 卡片头右端：操作按钮 + 状态徽标，**同一个可换行整体**。
+                       *
+                       * 用户 2026-10-29：「添加账号」放在「运行中 / 未接入」的
+                       * **左侧**。两枚元素必须同组，否则窄卡片里会出现「按钮留在
+                       * 第一行、徽标被挤到第二行」—— 视觉上它俩就不挨着了，而
+                       * 「动作紧挨结论」正是这次要的效果。
+                       *
+                       * 顺序是 DOM 顺序（标题 → 操作 → 状态），不用 `order`
+                       * 反转：视觉顺序必须等于 Tab 焦点顺序。
+                       */
                       h(
-                        "span",
-                        { className: "chub-chanstate" },
-                        c.error
-                          ? "渠道异常"
-                          : accounts.length === 0
-                            ? "未接入"
-                            : accounts.some((a: any) => a.enabled)
-                              ? "运行中"
-                              : "已停用",
+                        "div",
+                        { className: "chub-chanheadend" },
+                        h(
+                          "div",
+                          { className: "chub-chanacts chub-chanheadacts" },
+                          c.id === "loomy"
+                            ? h(
+                                React.Fragment,
+                                null,
+                                btn(
+                                  "微信扫码登录",
+                                  () => login(c.id, "wechat"),
+                                  {
+                                    kind: "primary",
+                                    small: true,
+                                    disabled:
+                                      busy || !!c.error || c.canLogin === false,
+                                  },
+                                ),
+                                btn("短信登录", () => login(c.id, "sms"), {
+                                  small: true,
+                                  disabled:
+                                    busy || !!c.error || c.canLogin === false,
+                                }),
+                              )
+                            : btn("添加账号", () => login(c.id), {
+                                kind: "primary",
+                                small: true,
+                                disabled:
+                                  busy || !!c.error || c.canLogin === false,
+                              }),
+                        ),
+                        h(
+                          "span",
+                          { className: "chub-chanstate" },
+                          c.error
+                            ? "渠道异常"
+                            : accounts.length === 0
+                              ? "未接入"
+                              : accounts.some((a: any) => a.enabled)
+                                ? "运行中"
+                                : "已停用",
+                        ),
                       ),
                     ),
                     c.error &&
                       h("p", { className: "chub-inline err" }, c.error),
                     /**
-                     * 统计与操作合并在同一行：操作按钮靠右（`margin-left:auto`）。
+                     * 统计行只剩读数：账号 / 模型 / 目录 / 大窗口档开关。
                      *
-                     * ⚠️ 别把 `.chub-chanacts` 再拆成独立一行 —— 卡片头部信息已经
-                     * 三行（标题 / 状态、统计、账号列表），按钮单独占一行会让
-                     * 每张卡在常见宽度下多出 30px 空白。窄到放不下时 flex-wrap
-                     * 会把按钮换到下一行，`margin-left:auto` 仍然靠右。
+                     * 按钮组（添加账号、更新模型）已分别迁走 —— 「添加账号」
+                     * 进卡片头（贴状态徽标左侧），「更新模型」上移到区块工具条
+                     * 并改为更新全部渠道。统计行因此不需要右推留白。
                      */
                     h(
                       "div",
@@ -1454,8 +1631,14 @@ window.__ModuleLoader__.load({
                             "aria-label": c.name + " 使用账号",
                             value: c.selectedAccountId ?? "",
                             disabled: busy,
-                            title:
-                              "对该渠道后续请求生效；指定账号时不会自动换号",
+                            /**
+                             * `title` 放**选中项全文**：下拉框用 `text-overflow:
+                             * ellipsis` 把长昵称收成 `…`（否则原生 select 会在
+                             * 字形中间硬切，见 client.css 的说明），全文因此只能
+                             * 靠悬停补回。未选中（自动选择）时不加，避免出现一个
+                             * 与界面文字重复的空悬停。
+                             */
+                            title: selectedOptionTitle(c, accounts),
                             onChange: (e: any) =>
                               action("channels.selectAccount", {
                                 provider: c.id,
@@ -1480,23 +1663,28 @@ window.__ModuleLoader__.load({
                                 value: a.id,
                                 disabled: !a.enabled,
                               },
-                              (a.nickname || a.id) +
-                                (a.nickname &&
-                                accounts.filter(
-                                  (other: any) => other.nickname === a.nickname,
-                                ).length > 1
-                                  ? " · " + a.id.slice(-6)
-                                  : "") +
-                                (a.enabled ? "" : "（已停用）"),
+                              accountOptionLabel(a, accounts),
                             ),
                           ),
                         ),
-                        c.selectedAccountId &&
-                          h(
-                            "span",
-                            { className: "muted" },
-                            "固定使用，不自动换号",
-                          ),
+                        /**
+                         * 「固定使用，不自动换号」**移除**（2026-10-29）。
+                         *
+                         * 它原本挂在选中账号旁边解释「你不会被自动换号」。实测
+                         * 这句话在卡片网格里**永远放不下**：华为码道这种 45 字符
+                         * 昵称的卡片，连同提示语一行需要 658px，而卡片内容宽最宽
+                         * 也只有 442px（2400px 视口）。放不下的结果不是它自己被
+                         * 截断，而是把「账号 N/M」「模型 N」「目录」整组顶到下一行，
+                         * 卡片比同排高出一大截 —— 用户报的「下拉框文字挤压其它
+                         * 文字」正是这个。
+                         *
+                         * 信息也没有丢：下拉框显示着一个具体账号（而不是「自动
+                         * 选择」）本身就是「固定使用」的信号，`title` 里还写着
+                         * 「指定账号时不会自动换号」。**不要**改成用容器查询把它
+                         * 藏起来 —— 两个原因：① 阈值要贴着 658px 这种由昵称长度
+                         * 决定的数字，昵称再长一点就重新溢出；② 藏起来的分支永远
+                         * 不显示，等于留了一段死代码。
+                         */
                       ),
                       h(
                         "span",
@@ -1563,37 +1751,6 @@ window.__ModuleLoader__.load({
                           }),
                           h("span", null, "大窗口档"),
                         ),
-                      h(
-                        "div",
-                        { className: "chub-chanacts" },
-                        c.id === "loomy"
-                          ? h(
-                              React.Fragment,
-                              null,
-                              btn("微信扫码登录", () => login(c.id, "wechat"), {
-                                kind: "primary",
-                                small: true,
-                                disabled:
-                                  busy || !!c.error || c.canLogin === false,
-                              }),
-                              btn("短信登录", () => login(c.id, "sms"), {
-                                small: true,
-                                disabled:
-                                  busy || !!c.error || c.canLogin === false,
-                              }),
-                            )
-                          : btn("添加账号", () => login(c.id), {
-                              kind: "primary",
-                              small: true,
-                              disabled:
-                                busy || !!c.error || c.canLogin === false,
-                            }),
-                        btn(
-                          "更新模型",
-                          () => action("models.refresh", { provider: c.id }),
-                          { small: true },
-                        ),
-                      ),
                     ),
                     smsLogin?.provider === c.id &&
                       h(
@@ -1894,7 +2051,7 @@ window.__ModuleLoader__.load({
                                         className: "chub-inline muted",
                                         style: { padding: "6px 2px 0" },
                                       },
-                                      "目录为空。点击“更新模型”重试，远端确认的条目会自动出现。",
+                                      "目录为空。点击上方“更新模型”重试，远端确认的条目会自动出现。",
                                     )
                                   : h(
                                       "div",

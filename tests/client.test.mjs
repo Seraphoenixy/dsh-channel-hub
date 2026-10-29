@@ -566,36 +566,102 @@ test("removed detail column leaves no positional side effects", () => {
   );
 });
 
-test("channel card actions sit on the stats row, pushed to the right edge", () => {
-  // 用户 2026-10-21：渠道卡的「添加账号 / 更新模型」原先单独占一行，卡片头占
-  // 四行。要求挪到上一行（统计行）并靠右。
+test("the add-account button sits immediately left of the status pill", () => {
+  // 用户 2026-10-29：要求「添加账号」放在「运行中 / 未接入」状态显示的**左侧**。
   //
-  // 靠右必须用 `margin-left:auto` 而不是 `justify-content:space-between`：
-  // 统计项数量随内容变化（目录未更新时那一项变成一句「目录未更新」），
-  // space-between 会把空隙均分，按钮位置随内容左右跳动。auto 外边距只吃
-  // 剩余空间，按钮永远贴右边缘；换行时仍然生效。
-  assert.ok(
-    /\.chub-chanmeta>\.chub-chanacts\{[^}]*margin-left:auto/.test(css),
-    "the action group must be pushed right by an auto margin on the stats row",
+  // 结构：卡片头右端是一个整体块（`.chub-chanheadend`），内部顺序为
+  // 操作 → 状态。整体块一起换行，否则窄卡片里会出现「按钮留在第一行、
+  // 徽标被挤到第二行」—— 两者就不挨着了，而「动作紧挨结论」正是这次的效果。
+  //
+  // 顺序靠 DOM 保证（不用 CSS `order`），否则 Tab 焦点顺序与视觉顺序相反。
+  const card = nodes(renderChannelFixture().tree).find(
+    (n) => n.props?.className === "chub-channel",
+  );
+  const head = card?.children.find(
+    (n) => n?.props?.className === "chub-chanhead",
+  );
+  assert.ok(head, "the card must keep a header row");
+  const end = head.children.find(
+    (n) => n?.props?.className === "chub-chanheadend",
+  );
+  assert.ok(end, "the header must group the actions with the status pill");
+  assert.deepEqual(
+    end.children
+      .filter((n) => n && typeof n === "object")
+      .map((n) => n.props?.className),
+    ["chub-chanacts chub-chanheadacts", "chub-chanstate"],
+    "the action group must come directly before the status pill",
+  );
+  assert.match(
+    end.children[0].children[0].props.className,
+    /chub-btn/,
+    "the header action group must actually hold the button",
   );
   assert.ok(
-    !/\.chub-chanmeta\{[^}]*justify-content:space-between/.test(css),
-    "space-between would make button position depend on how many stats there are",
-  );
-  // 结构上，按钮组必须真的嵌在统计行里 —— 只加 CSS 而 JSX 仍是兄弟节点无效。
-  const statsRow = nodes(renderChannelFixture().tree).find(
-    (n) => n.props?.className === "chub-chanmeta",
+    /\.chub-chanheadend\{[^}]*margin-left:auto/.test(css),
+    "an auto margin pushes the action+status block to the right edge",
   );
   assert.ok(
-    statsRow?.children.some((n) => n?.props?.className === "chub-chanacts"),
-    "the actions must be rendered inside the stats row, not as a sibling",
+    /\.chub-chanheadend\{[^}]*flex:none/.test(css),
+    "the block must not shrink, or the pill detaches from the buttons",
   );
-  // 且不得再出现「统计行结束后紧跟一行按钮组」的旧结构。
   assert.ok(
-    !/className: "chub-chanactions"/.test(decoded),
-    "no leftover standalone action row class",
+    !/\.chub-chanhead\{[^}]*justify-content:space-between/.test(css),
+    "space-between would push the buttons away from the status pill",
+  );
+  // 统计行不再承载按钮：只加 CSS 而 JSX 仍留着旧按钮组会渲染出两个「添加账号」。
+  const meta = card?.children.find(
+    (n) => n?.props?.className === "chub-chanmeta",
+  );
+  assert.ok(
+    !meta?.children.some((n) => n?.props?.className?.includes("chub-chanheadacts")),
+    "the stats row must not carry a second action group",
+  );
+  assert.equal(
+    nodes(renderChannelFixture().tree).filter(
+      (n) => n.props?.className === "chub-chanacts chub-chanheadacts",
+    ).length,
+    1,
+    "exactly one action group per card — a leftover copy renders a duplicate button",
   );
 });
+
+test("model refresh is a section-level action covering every channel", () => {
+  // 用户 2026-10-29：把「更新模型」挪到「旧账号导入」左侧，并改为更新**所有**渠道。
+  const tools = nodes(renderChannelFixture().tree).find(
+    (n) => n.props?.className === "chub-sectools",
+  );
+  assert.ok(tools, "the channel section must keep its tool bar");
+  const labels = tools.children
+    .filter((n) => n?.type === "button")
+    .map((n) => n.children[0]);
+  assert.deepEqual(
+    labels,
+    ["更新模型", "旧账号导入"],
+    "the refresh button must come before the legacy import button",
+  );
+  // 逐卡「更新模型」已移除 —— 只留工具条那一枚。
+  assert.equal(
+    nodes(renderChannelFixture().tree).filter(
+      (n) => n?.type === "button" && n.children?.[0] === "更新模型",
+    ).length,
+    1,
+    "the per-channel refresh button must be gone; the tool bar owns it now",
+  );
+  // 两个按钮必须同一款式：并排时一个有描边一个没有，看起来像两种层级。
+  const importBtn = tools.children.filter((n) => n?.type === "button")[1];
+  const refreshBtn = tools.children.filter((n) => n?.type === "button")[0];
+  assert.equal(
+    importBtn.props.className.replace(" chub-btn", ""),
+    refreshBtn.props.className.replace(" chub-btn", ""),
+    "the legacy import button must use the same border style as refresh",
+  );
+  assert.ok(
+    !importBtn.props.className.includes("ghost"),
+    "a transparent border next to a bordered button reads as a different tier",
+  );
+});
+
 
 test("multi-account channel cards span two columns and lay their accounts side by side", () => {
   // 用户 2026-10-22：「有的有两个账号、有的单账号留下很多空隙」。
@@ -629,6 +695,61 @@ test("multi-account channel cards span two columns and lay their accounts side b
   assert.ok(
     /"data-multi": accounts\.length > 1/.test(decoded),
     "the channel card must emit data-multi when it has more than one account",
+  );
+});
+
+test("the refresh-all action reports its result and survives the reload", () => {
+  // 用户 2026-10-29：「更新模型按钮并不能正常工作」。
+  //
+  // 实测（真实宿主 + 合成上游）暴露两个缺陷：
+  //  ① 没有账号的渠道被计进 `refreshed` —— 9 个渠道只有 1 个有账号时界面
+  //     显示「已更新 8/9」，用户点完看不到任何变化，以为按钮坏了；
+  //  ② 结果提示写在 `load()` **之前**，而 `load()` 内部会 `setError("")`，
+  //     于是刚写进去的失败原因立刻被抹掉 —— 界面一条提示都没有。
+  //
+  // 这里锁的是**构建产物里的真实实现**（与其它 client 断言同一策略）：
+  // 行为本身另由 `artifacts/harness/probe-refresh.mjs` 在真实 Chromium 里点一遍。
+  assert.ok(
+    decoded.includes("没有可更新的渠道"),
+    "a refresh that touched nothing must say so instead of claiming success",
+  );
+  assert.match(
+    decoded,
+    /已更新 ["+ ]*refreshed/,
+    "the result line must report how many channels really refreshed",
+  );
+  assert.ok(
+    decoded.includes("skipped"),
+    "the host reports channels without accounts as skipped; the UI must read it",
+  );
+  // 文案分档：失败要点名、跳过要计数。
+  assert.match(decoded, /失败 /, "failures must be named in the result line");
+  assert.match(
+    decoded,
+    /跳过 ["+ ]*skipped\.length/,
+    "skipped channels must be counted separately from failures",
+  );
+  /**
+   * ⚠️ 顺序断言：`await load()` 必须在写结果提示**之前**。
+   *
+   * 只断言「两句话都在源码里」挡不住这个回归 —— 缺陷正是顺序。这里从
+   * `refreshAllModels` 的函数体里取出 `await load()` 与第一次 `setNotice` /
+   * `setError` 的位置，要求前者更靠前。
+   */
+  const body = decoded.slice(
+    decoded.indexOf("refreshAllModels = async"),
+    decoded.indexOf("const login = async"),
+  );
+  assert.ok(body.length > 200, "the refresh handler must be locatable");
+  const loadAt = body.indexOf("await load()");
+  // 函数开头有一句 `setNotice("")` 用于清空上一次的结果，它当然在 load() 之前 ——
+  // 要找的是**写入结果**的那一次，用结果文案定位。
+  const noticeAt = body.indexOf("没有可更新的渠道");
+  assert.ok(loadAt >= 0, "the handler must reload the channel list");
+  assert.ok(noticeAt >= 0, "the handler must write a result notice");
+  assert.ok(
+    loadAt < noticeAt,
+    "load() clears the error slot — writing the result before it loses the message",
   );
 });
 
@@ -884,4 +1005,106 @@ test("a Trae off-peak model shows the window in the title, not the chip", () => 
     /promotionWindow/.test(decoded),
     "the window text must still be rendered (in the tooltip)",
   );
+});
+
+test("a long account nickname is ellipsized instead of squeezing the stats row", () => {
+  // 用户 2026-10-29：长昵称会溢出挤压同一行的其它文字。真实数据是华为码道的
+  // `codearts-d6a47740-cb1d-4ac1-80d4-34f8e0efe974`（45 字符）。
+  //
+  // 1440px 实测的故障形态：统计行**被迫换行**，「账号 1/1」「模型 7」「目录」
+  // 被顶到下一行，卡片比同排高出一大截；同时原生 select 的默认
+  // `text-overflow:clip` 把文字在字形中间硬切（末字符只剩半个）。
+  //
+  // 根因不是「下拉框太宽」，而是统计行允许换行 + 旁边还有一行 120px 的
+  // 「固定使用，不自动换号」。带那行提示时整行需要 658px，而卡片内容宽最宽
+  // 也只有 442px（2400px 视口）—— 提示语在卡片网格里**永远放不下**，于是它
+  // 把读数整组顶走。故提示语从标记里移除（含义并入 title），而不是留一段
+  // 永不显示的 `display:none` 分支。
+  const meta = css.match(/\.chub-chanmeta\{[^}]*\}/)?.[0];
+  assert.ok(meta, "the stats row must be locatable");
+  assert.match(
+    meta,
+    /flex-wrap:nowrap/,
+    "wrapping is the actual failure mode: the readings get pushed to a second line",
+  );
+  const choice = css.match(/\.chub-account-choice\{[^}]*\}/)?.[0];
+  assert.ok(choice, "the account selector label must be locatable");
+  assert.match(
+    choice,
+    /flex-wrap:nowrap/,
+    "wrapping inside the label pushes the stats row down a line",
+  );
+  assert.match(
+    choice,
+    /flex:0 1 auto/,
+    "the selector must yield width; the readings are non-negotiable",
+  );
+  const select = css.match(/\.chub-account-choice select\{[^}]*\}/)?.[0];
+  assert.ok(select, "the select rules must be locatable");
+  assert.match(
+    select,
+    /text-overflow:ellipsis/,
+    "without an ellipsis Chromium hard-clips the text mid-glyph",
+  );
+  assert.match(
+    select,
+    /white-space:nowrap/,
+    "nowrap is part of the same rule: otherwise the overflow wraps and grows the box",
+  );
+  assert.match(
+    select,
+    /overflow:hidden/,
+    "ellipsis only renders when overflow is hidden",
+  );
+  assert.match(
+    select,
+    /max-width:min\([^)]*100%\)/,
+    "the cap must fall back to the container width on narrow cards",
+  );
+  // 那段提示语不得留在标记里 —— 它是「放不下」的主体。
+  assert.ok(
+    !/className: "muted"\s*\},\s*"固定使用/.test(decoded),
+    "the never-fitting hint must not remain a sibling of the selector",
+  );
+  const selectNode = nodes(renderChannelFixture().tree).find(
+    (n) => n.type === "select",
+  );
+  assert.equal(
+    selectNode?.props?.title,
+    "Account B（已停用）\n固定使用，不自动换号",
+    "the hint's meaning must survive in the tooltip (b is disabled in the fixture)",
+  );
+  // 读数项不可压缩：允许收缩会让「账号 N/M」被压成竖排。
+  assert.match(
+    css,
+    /\.chub-chanmeta>b,\.chub-chanmeta>span\{flex:none\}/,
+    "the readings must not shrink",
+  );
+});
+
+test("the account option label is composed once, so tooltip and option agree", () => {
+  // 悬停文字与下拉项若各拼一遍，重名尾号 / 停用标记迟早对不上。
+  // 夹具里 b 是停用账号，故选中项的文案必须带「（已停用）」。
+  const tree = renderChannelFixture("b").tree;
+  const select = nodes(tree).find((n) => n.type === "select");
+  assert.equal(
+    select.props.title,
+    "Account B（已停用）\n固定使用，不自动换号",
+    "the tooltip carries the full name plus the fixed-account meaning",
+  );
+  const option = nodes(select).find(
+    (n) => n.type === "option" && n.props?.value === "b",
+  );
+  assert.deepEqual(
+    option.children,
+    ["Account B（已停用）"],
+    "the option itself must not gain the tooltip's second line",
+  );
+  // 自动选择（无选中项）也要有悬停 —— 它解释的是「不会固定到某一个」，
+  // 而这句话原本也由被移除的那行提示承担。
+  const auto = nodes(renderChannelFixture(null).tree).find(
+    (n) => n.type === "select",
+  );
+  assert.match(auto.props.title, /自动选择/);
+  assert.match(auto.props.title, /不会固定/);
 });

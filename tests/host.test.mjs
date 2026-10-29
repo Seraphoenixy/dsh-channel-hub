@@ -180,6 +180,46 @@ test(
       });
       assert.deepEqual(await plugin.dispatch("migration.preview"), []);
       /**
+       * 「更新模型」现在是区块级动作（不带 `provider` ⇒ 全部渠道）。
+       *
+       * 夹具的 fetch 恒抛错，于是 CodeBuddy 的账号目录必然失败，而其余没有
+       * 账号的渠道「无事可做」。要求：**部分失败不抛错**，逐个点名失败渠道，
+       * 成功的渠道照常计入 —— 界面才能说出「已更新 N/M」而不是笼统失败。
+       *
+       * ⚠️ 这里同时锁住「快照 error 也算失败」：`driver.reload()` 把上游失败
+       * 吞成 `{stale: true, error}` 的快照并正常 resolve，只看 Promise 的
+       * rejected 会把满盘皆错报成「全部更新成功」。
+       */
+      const bulk = await plugin.dispatch("models.refresh", {});
+      assert.equal(bulk.total, 9, "the bulk refresh covers every channel");
+      assert.ok(
+        bulk.failures.some((f) => f.startsWith("buddy：")),
+        "a channel whose directory request failed must be named: " +
+          JSON.stringify(bulk.failures),
+      );
+      /**
+       * ⚠️ 三个桶必须**互斥且穷尽**（2026-10-29 修）。
+       *
+       * 旧实现把「没有账号的渠道」也算进 `refreshed`：夹具里 9 个渠道只有
+       * buddy 有账号，界面却显示「已更新 8/9」——用户点完看不到任何变化，
+       * 于是报「按钮不能用」。现在无账号的渠道进 `skipped`，既不算成功也
+       * 不算失败。
+       */
+      assert.equal(
+        bulk.refreshed + bulk.failures.length + bulk.skipped.length,
+        bulk.total,
+        "every channel must land in exactly one bucket (refreshed / failed / skipped)",
+      );
+      assert.ok(
+        bulk.skipped.includes("qoder"),
+        "a channel with no accounts must be skipped, not refreshed: " +
+          JSON.stringify(bulk.skipped),
+      );
+      assert.ok(
+        bulk.refreshed < bulk.total,
+        "channels that did nothing must not be counted as refreshed",
+      );
+      /**
        * 大窗口档开关：真实 RPC 路径 + 落库 + 拒绝非法渠道。
        *
        * ⚠️ 这里断言的是**开关本身**，不是「Trae 真的走 1M」——后者需要真实
