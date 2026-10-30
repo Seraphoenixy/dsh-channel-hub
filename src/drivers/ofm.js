@@ -134,8 +134,48 @@ export const streamMeta = (opts) => {
     startsTurn: last?.role === "user" && !hasToolResult,
   };
 };
+/**
+ * 图片「请求版本」桥接（2026-10-29，用户报障 raccoon 413 10MB / qoder 413 50MB）。
+ *
+ * ## 为什么必须有它
+ *
+ * 适配器（raccoon / qoder / buddy…）在发图前会先走 `projectRequestImage`：
+ * 按产品预算（raccoon 640k 像素 + 512KB/张，专为 10MB 网关设计）向宿主附件
+ * 服务请求一份**确定性、可缓存**的缩放版本；拿不到才回退 `readImage` 的
+ * **原始字节**。此前本驱动只桥接了 `readImage`、漏了 `readImageRequest`，
+ * 于是 `projectRequestImage` 第一行就返回 `undefined` —— 每张图都按原始
+ * 分辨率 base64 内联（一张 2560×1600 截图 ≈3-7MB），历史里每轮全量重发，
+ * 两三张就顶穿 raccoon 的 10MB 请求体上限（账本实证：同一会话连续 17 轮
+ * 成功后从某轮起连报 `request body exceeds 10MB`）。vendor 原入口
+ * （`vendor/ofm/src/index.ts` 的 `makeReadImageRequest`）给每个适配器都
+ * 桥了这一项，本驱动从它改造时丢了。
+ *
+ * ## 错误契约（与驱动的 `readImage` 桥接相反）
+ *
+ * **任何不可用都返回 `undefined`、绝不抛错**，适配器据此回退原图：
+ * 1. 宿主没装附件服务，或该版本没有 `readImageRequest`（老契约）；
+ * 2. 投影结果缺 mediaType（形状不认识）；
+ * 3. 派生过程抛错（缓存不可写、字节校验失败…）—— 缩放是优化，
+ *    不能因为「想缩图」把一次本来能成功的请求打死。
+ */
+export const makeImageRequestBridge = (ctx) => async (attachment, target) => {
+  const service = ctx.get?.("attachments");
+  if (typeof service?.readImageRequest !== "function") return undefined;
+  try {
+    const projected = await service.readImageRequest(attachment, target);
+    const mediaType = projected?.mediaType ?? projected?.attachment?.mediaType;
+    if (mediaType === undefined) return undefined;
+    return { data: projected.data, mediaType };
+  } catch (e) {
+    // 只记日志、随后回退原图（vendor 同款语义，见 makeReadImageRequest）。
+    ctx.logger?.warn?.("图片请求版本派生失败，回退原图：" + redact(e));
+    return undefined;
+  }
+};
+
 export async function createDrivers(ctx, { catalog, observer, store }) {
   configureHubCache(ctx.channelHubDataDir + "/catalog-cache");
+  const imageRequestBridge = makeImageRequestBridge(ctx);
   const directoryContext = new AsyncLocalStorage();
   const directoryFetch = async (input, init) => {
     const state = directoryContext.getStore();
@@ -308,6 +348,9 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
           const v = await attachment.readImage(ref);
           return { data: v.data, mediaType: v.ref?.mediaType ?? v.mediaType };
         },
+        // 缩放投影（见 createDrivers 顶部的 imageRequestBridge 注释）：
+        // 没有它，每张图都按原始字节内联，raccoon/qoder 的请求体上限必被顶穿。
+        readImageRequest: imageRequestBridge,
         fetchImpl: observer.fetcher(fetch),
         fetchRemoteModels: async () => product.fallbackModels,
         catalogModels: () => product.fallbackModels,

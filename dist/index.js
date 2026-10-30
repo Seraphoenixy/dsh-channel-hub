@@ -4364,6 +4364,16 @@ function extractJsonArray(text3, path) {
     return void 0;
   }
 }
+function isCodeArtsAuthFailure(status, body) {
+  if (status === 401 || status === 403) return true;
+  return body.includes("APIG.0602") || /invalid\s+token|token\s+expired|token\s+is\s+invalid/i.test(body);
+}
+var CodeArtsCatalogAuthError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "CodeArtsCatalogAuthError";
+  }
+};
 async function fetchSignedGet(fetcher, url, ak, sk, st, extraUnsignedHeaders) {
   const signed = await signRequestHuawei(ak, sk, st, "GET", url, new Uint8Array());
   const headers = new Headers();
@@ -4379,9 +4389,18 @@ async function fetchSignedGet(fetcher, url, ak, sk, st, extraUnsignedHeaders) {
       headers,
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
     });
-    if (!response.ok) return void 0;
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      if (isCodeArtsAuthFailure(response.status, body)) {
+        throw new CodeArtsCatalogAuthError(
+          `HTTP ${response.status}${body.length > 0 ? ` ${body.slice(0, 200)}` : ""}`
+        );
+      }
+      return void 0;
+    }
     return await response.text();
-  } catch {
+  } catch (error) {
+    if (error instanceof CodeArtsCatalogAuthError) throw error;
     return void 0;
   }
 }
@@ -4810,31 +4829,118 @@ var CodeArtsAuth = class extends Service {
    * 为什么用「可用账号」而不是遍历全部账号：模型目录是**账号无关**的（同一个
    * 华为云账号体系下发同一份目录），取第一个能解析出 AK/SK 的账号即可，
    * 无需为每个账号各拉一次。
+   *
+   * ## 鉴权失败自愈（2026-10-29，用户报障「目录 HTTP 400：code APIG.0602：
+   * the security token has expired」）
+   *
+   * 聊天路径（`llm-adapter.ts`）早有「入口预判 expires_at + 401 兜底刷新重试」
+   * 的自愈，目录路径却没有：`firstUsableCredential` 只看 AK/SK **存在**，
+   * 不看过期，过期凭据照样拿去签名。华为 APIG 网关于是以
+   * `HTTP 400 code APIG.0602` 拒绝（注意是 **400**，不是聊天路径的 401/403
+   * —— 状态码不固定，判据见 `models.ts` 的 `isCodeArtsAuthFailure`），
+   * `fetchCodeArtsRemoteModels` 把它吞成空列表，UI 显示「模型 0」。
+   *
+   * 修法与聊天路径同一策略、同一把锁：
+   * 1. 取凭据后**先按 `expires_at` 预判**（`shouldRefreshNow` 的 lead-time
+   *    语义：距过期不足 1 小时即刷），别等网关拒一次；
+   * 2. 首次请求仍被拒（提前吊销 / 时钟偏差）→ 静默续期一次后重试（②）；
+   * 3. 重试仍失败才抛给调用方 —— `CatalogService.refresh` 会把原因写进
+   *    快照 `error` 字段上浮到 UI，同时保留旧模型列表兜底。
+   *
+   * 续期走 {@link refreshCredentialUnderLock}（per-ref 串行 + 锁内重读 +
+   * `syncAccountExpiry` 回写），与 `refreshAll` / 推理路径 / RPC 三条入口
+   * **共用同一把互斥锁**：并发下不会重复消费 refresh_token（华为 STS 每次
+   * 签发都会作废旧的一份）。仓库侧的 `RenewalService.tick` 每小时也扫过期
+   * 账号，但目录刷新不该等它 —— 拉目录的时机（登录后顺手、启动首轮、
+   * 手动刷新）都在它的小时级扫描间隙里。
    */
   async refreshModels(pool) {
     if (!this.active) return [];
-    const credential = await this.firstUsableCredential(pool);
-    if (credential === void 0) return [];
-    const models = await fetchCodeArtsRemoteModels(credential, this.fetchImpl);
-    if (models.length > 0) {
-      setMemoryCache(models);
-      saveModelsCache(models);
+    const entry = await this.firstUsableEntry(pool);
+    if (entry === void 0) return [];
+    const persist = async (models) => {
+      if (models.length > 0) {
+        setMemoryCache(models);
+        saveModelsCache(models);
+      }
+    };
+    let credential = entry.credential;
+    if (shouldRefreshNow(CODEARTS_EXPIRY_ACCESSORS.expiresAtOf(credential))) {
+      credential = await this.renewForCatalog(entry, pool);
     }
-    return models;
+    try {
+      const models = await fetchCodeArtsRemoteModels(credential, this.fetchImpl);
+      await persist(models);
+      return models;
+    } catch (error) {
+      if (!(error instanceof CodeArtsCatalogAuthError)) throw error;
+      this.ctx.logger?.info?.(
+        `[codearts] \u6A21\u578B\u76EE\u5F55\u8BF7\u6C42\u88AB\u62D2\uFF08${error.message}\uFF09\uFF0C\u9759\u9ED8\u7EED\u671F\u540E\u91CD\u8BD5\u4E00\u6B21`
+      );
+      credential = await this.renewForCatalog(entry, pool);
+      const models = await fetchCodeArtsRemoteModels(credential, this.fetchImpl);
+      await persist(models);
+      return models;
+    }
   }
   /**
-   * 取账号池里第一个**凭据可解析且含 AK/SK** 的账号凭据。
+   * 为目录拉取续期一个账号的凭据，并返回（可能仍是原来的）可用凭据。
+   *
+   * 走 {@link refreshCredentialUnderLock}（per-ref 串行 + 锁内重读凭据）：
+   * 等锁期间他处（推理路径 / `refreshAll`）可能已经把凭据续好，此时直接
+   * 复用新凭据，**不再发第二次续期请求** —— 华为 STS 签发新凭据会作废旧的
+   * refresh_token，重复消费会把他处的成功续期顶掉（真实缺陷，见
+   * `refreshAll` 的并发重放防护）。
+   *
+   * 续期失败（材料不齐会得到「无 refresh_token，请重新登录」、服务端拒绝会
+   * 得到 `invalid_grant` 等）时先重读磁盘凭据：若他处（跨进程）已续好且未
+   * 过期，复用之；否则原样上抛，由调用方决定是否把原因透传给 UI。
+   *
+   * @returns 续期（或重读）后的凭据；失败按上抛。
+   */
+  async renewForCatalog(entry, pool) {
+    const latest = await this.refreshCredentialUnderLock(
+      entry.ref,
+      entry.credential
+    ).catch(async (error) => {
+      const current = await this.readCredential(entry.ref).catch(() => void 0);
+      if (current !== void 0 && !shouldRefreshNow(CODEARTS_EXPIRY_ACCESSORS.expiresAtOf(current))) {
+        this.ctx.logger?.info?.(
+          `[codearts] \u76EE\u5F55\u7EED\u671F\u88AB\u62D2\u4F46\u51ED\u636E\u5DF2\u88AB\u4ED6\u5904\u66F4\u65B0\uFF0C\u6309\u6700\u65B0\u51ED\u636E\u7EE7\u7EED`
+        );
+        return current;
+      }
+      throw error;
+    });
+    if (!this.sameCredential(latest, entry.credential)) {
+      await this.ctx.credentials.set(credentialRef2(entry.ref), JSON.stringify(latest));
+    }
+    await syncAccountExpiry({
+      pool,
+      provider: "codearts",
+      credential: latest,
+      accessors: CODEARTS_EXPIRY_ACCESSORS,
+      accountId: entry.accountId,
+      tag: "[codearts]",
+      warn: (message) => this.ctx.logger?.warn?.(message)
+    });
+    return latest;
+  }
+  /**
+   * 取账号池里第一个**凭据可解析且含 AK/SK** 的账号（含其 ref 与 id）。
    *
    * 按 `readAccounts()` 的既有顺序（用户的 Channel Pack 拖拽顺序）遍历，短路返回。
    * `getAvailableAccount` 不适合这里：它会按 `enabled` 与限流状态过滤，而
    * 「拉模型目录」既不需要账号处于启用状态、也与限流无关。
    */
-  async firstUsableCredential(pool) {
+  async firstUsableEntry(pool) {
     for (const entry of pool.listAccountsByProvider("codearts")) {
       const resolved = await this.ctx.credentials.resolve(credentialRef2(entry.credentialRef));
       if (!resolved) continue;
       const credential = parseCredential(resolved.value);
-      if (credential?.access_key_id && credential.secret_access_key) return credential;
+      if (credential?.access_key_id && credential.secret_access_key) {
+        return { ref: entry.credentialRef, credential, accountId: entry.id };
+      }
     }
     return void 0;
   }
@@ -5549,8 +5655,7 @@ function isQueueError(status, body) {
   return status === 400 && (body.includes("TM.00001041") || /peak\s+usage|try\s+again\s+after|peak\s+hours/i.test(body) || /high\s+demand|too\s+many\s+requests/i.test(body));
 }
 function isAuthError(status, body) {
-  if (status === 401 || status === 403) return true;
-  return body.includes("APIG.0602") || /invalid\s+token|token\s+expired|token\s+is\s+invalid/i.test(body);
+  return isCodeArtsAuthFailure(status, body);
 }
 function isSseQueueErrorCode(code) {
   return code === "TM.00001041" || /81111|TPM|(^|[^0-9])429([^0-9]|$)|rate.?limit|too many requests|排队|限流/i.test(code);
@@ -22363,8 +22468,22 @@ var streamMeta = (opts) => {
     startsTurn: last?.role === "user" && !hasToolResult
   };
 };
+var makeImageRequestBridge = (ctx) => async (attachment, target) => {
+  const service = ctx.get?.("attachments");
+  if (typeof service?.readImageRequest !== "function") return void 0;
+  try {
+    const projected = await service.readImageRequest(attachment, target);
+    const mediaType = projected?.mediaType ?? projected?.attachment?.mediaType;
+    if (mediaType === void 0) return void 0;
+    return { data: projected.data, mediaType };
+  } catch (e) {
+    ctx.logger?.warn?.("\u56FE\u7247\u8BF7\u6C42\u7248\u672C\u6D3E\u751F\u5931\u8D25\uFF0C\u56DE\u9000\u539F\u56FE\uFF1A" + redact(e));
+    return void 0;
+  }
+};
 async function createDrivers(ctx, { catalog, observer, store }) {
   configureHubCache(ctx.channelHubDataDir + "/catalog-cache");
+  const imageRequestBridge = makeImageRequestBridge(ctx);
   const directoryContext = new AsyncLocalStorage2();
   const directoryFetch = async (input, init) => {
     const state = directoryContext.getStore();
@@ -22501,6 +22620,9 @@ async function createDrivers(ctx, { catalog, observer, store }) {
           const v = await attachment.readImage(ref);
           return { data: v.data, mediaType: v.ref?.mediaType ?? v.mediaType };
         },
+        // 缩放投影（见 createDrivers 顶部的 imageRequestBridge 注释）：
+        // 没有它，每张图都按原始字节内联，raccoon/qoder 的请求体上限必被顶穿。
+        readImageRequest: imageRequestBridge,
         fetchImpl: observer.fetcher(fetch),
         fetchRemoteModels: async () => product.fallbackModels,
         catalogModels: () => product.fallbackModels,

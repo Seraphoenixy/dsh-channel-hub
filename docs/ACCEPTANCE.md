@@ -4,6 +4,34 @@
 
 ## 已完成
 
+- **raccoon 413 10MB / qoder 413 50MB：图片「请求版本」桥接缺失**（2026-10-29，用户报障「form_generate 工作区 raccoon: request body exceeds 10MB；qoder: code=413 Request body size exceeds maximum allowed 52428800 bytes；上下文也不大啊」）：
+
+  1. **根因是插件实现的接线缺失，且不在文本上下文**。体积全部来自**图片附件的 base64 内联**：适配器把会话历史里的每张图按 `readImage` 的**原始字节**编进请求体，每轮全量重发。账本实证（只读复制 `ledger.sqlite`）：两条报障错误来自**同一个会话** `session-b5728ff1…` —— raccoon 连续 17 轮成功（12:53–13:04）后，13:07:02 / 13:08:13 连续 `request body exceeds 10MB`；切换渠道后 qodercn 于 13:19:02 撞 `Request body size exceeds maximum allowed 52428800 bytes`（50MB，此时积累的图更多）。这正是「图片随会话累积、每轮全量重发」的形态；**该会话 token 用量很低（raccoon 不回 usage，但同窗的 codearts/qodercn 成功请求 input 数百到数千）**，「上下文不大」的直觉正是对的部分：撑爆请求体的从来不是文本。
+
+  2. **适配器侧的自愈链路早已存在且正确，缺的是驱动层桥接**。vendor 的设计（issue !IKITT9）：发图前先走 `projectRequestImage` → 按产品预算向宿主附件服务请求一份**确定性、可缓存**的缩放版本（raccoon 专门配了 `imagePixelBudget: 640_000` + `imageMaxBytes: 512KB/张`，就是为 10MB 网关设计的；缩放后 base64 ≈683KB/张，10 张才 6.7MB），拿不到才回退原图。vendor 原入口（`vendor/ofm/src/index.ts` 的 `makeReadImageRequest`）给每个适配器都桥了 `readImageRequest`；本仓库驱动 `src/drivers/ofm.js` 从它改造时**只桥了 `readImage`（原图）、漏了 `readImageRequest`（投影）** —— `projectRequestImage` 第一行 `readImageRequest === undefined` 直接返回，于是每张图都原图直发（一张 2560×1600 截图原图 ≈3–7MB，两三张即顶穿 10MB）。qoder/qodercn 产品的像素/字节预算走默认档（640k px / 1MiB，有桥接后 base64 ≈1.33MB/张，37 张才触顶 50MB），同样生效。
+
+  3. **改动**（`src/drivers/ofm.js`，一处）：新增 `makeImageRequestBridge(ctx)` 并把它挂进每个适配器的 `options.readImageRequest` —— 完整复制 vendor `makeReadImageRequest` 的错误契约：**任何不可用都返回 `undefined`、绝不抛错**（宿主没装附件服务 / 老契约缺该函数 / 投影结果缺 mediaType / 派生抛错都回退原图，只记 warn 日志），缩放是优化、不能把本来能成功的请求打死。`readImage`（原图回退路径）保持不变。
+
+  4. **测试**（新增 `tests/raccoon-image-bridge.test.mjs` 7 项，接入 `test:errors`）：适配器层 —— 投影可用时按产品预算缩放（断言目标带 512KB 字节目标 + 像素预算把 2560×1600 缩进 640k）、投影不可用时回退原图不抛错（这正是报障时每个请求的实际行为）；驱动层 —— 桥接透传宿主投影并归一 mediaType（含挂在 `attachment.mediaType` 上的形态）、无附件服务/老契约返回 undefined、投影抛错吞掉并记 warn、适配器 options 确实包含 `readImageRequest` 键（源级断言，锁住缺口不再回归）；数学锁 —— 512KB×4/3 下 10 张 < 10MB、15 张才触顶（预算把「两三张原图顶穿」换成「极端张数才触顶」）。夹具不联网、不读真实账号。
+
+  5. `npm run check` 全绿（类型检查干净；核心 147、错误链 116、客户端 33、宿主 5、安装包 9 文件）。构建产物核对：`dist/index.js` 含 `readImageRequest` 桥接。诊断脚本存 `.cache/body-413-diag.mjs` / `body-413-diag2.mjs`（只读复制账本，不入库）。
+
+  6. **未验证 / 未改动**：未做真实宿主上的「大图会话 → 缩放后不再 413」端到端（需宿主重载插件 + 重放带图会话；缩放正确性由附件服务负责，本仓库只选目标）；qodercn 撞 50MB 时会话里已积累的图远超预算档能兜住的数量（1MiB/张 × 4/3 ≈ 1.33MB，37 张触顶），极端张数仍需靠 DSH 自身的会话压缩收敛，未单独调参；`form_generate` 工作区本身未动 —— 报障的两条错误都发生在推理请求体上，与该工作区无关。**宿主需重载插件才会载入新 `dist/`。**
+
+- **码道目录 APIG.0602 自愈**（2026-10-29，用户报障「目录 HTTP 400：code APIG.0602：Bad request: the security token has expired」）：
+
+  1. **根因：目录路径没有接聊天路径早已有的鉴权自愈**。聊天路径（`llm-adapter.ts` 的 `stream()`）有完整的「入口按 `expires_at` 预判续期 + 鉴权失败后静默刷新重试一次」；目录路径（`service.ts` 的 `refreshModels` → `models.ts` 的 `fetchCodeArtsRemoteModels`）却两点全缺：`firstUsableCredential` 只看 AK/SK **存在**、不看 `expires_at`，过期凭据照样签名发出；`fetchSignedGet` 对非 200 一律返回 `undefined`，APIG.0602 被吞成空列表。用户看到的错误文案来自 `src/drivers/ofm.js` 的 `directoryFetch` 记录的 `describeHttpFailure`（空列表 + 记录到的失败 → discover 抛出 → 落进目录快照 `error`），界面表现为「目录报错 / 模型为空」。另实证一点：**APIG.0602 的 HTTP 状态码不固定** —— 聊天路径实测 401/403，本次目录路径是 **400**，判据必须同时看状态码与响应体。
+
+  2. **改动**（`vendor/ofm/src/models.ts`、`service.ts`、`llm-adapter.ts`）：① `models.ts` 新增导出共享判据 `isCodeArtsAuthFailure(status, body)`（401/403，或体含 `APIG.0602` / `invalid token` / `token expired` / `token is invalid`）与 `CodeArtsCatalogAuthError`；`fetchSignedGet` 对命中判据的非 200 读体后**显式抛出**，其余失败（5xx / 通道下线的 4000 / 网络超时）维持既有容错返回 `undefined`。② `service.ts` 的 `refreshModels` 改为三段编排：取凭据后按 `shouldRefreshNow` **预判续期**（lead-time 语义，距过期不足 1 小时即刷）；拉取撞 `CodeArtsCatalogAuthError`（提前吊销 / 时钟偏差，预判覆盖不到）→ **静默续期一次后重试**；重试仍失败才上抛，由 `CatalogService.refresh` 写进快照 `error` 上浮 UI 并保留旧模型兜底。续期走 `refreshCredentialUnderLock` —— 与 `refreshAll` / 推理路径 / RPC **同一把 per-ref 互斥锁**（华为 STS 每次签发作废旧 refresh_token，并发重复消费会把他处成功续期顶掉），锁内重读 + 失败先重读磁盘做跨进程重放防护，成功后落盘并 `syncAccountExpiry` 回写账号池。③ `llm-adapter.ts` 私有 `isAuthError` 改为调用共享判据的薄封装 —— 聊天与目录两条路径从此共用唯一判据（同 `isVisualModelId` 的收敛先例）。
+
+  3. **测试**（新增 `tests/codearts-directory-auth.test.mjs` 9 项，接入 `test:errors` 套件）：判据本体（用户报障的 **400** 形态必须命中；401/403 含空体；反例锁死普通 5xx / 404 / 通道下线的 `4000` 不误伤）；`fetchCodeArtsRemoteModels` 对 APIG.0602 上抛带上游码、对非鉴权失败仍容忍为空列表；预判续期（过期凭据 → 先续后取，目录请求恰好 1 次）；撞 APIG.0602 → 静默续期重试**恰好一次**并恢复；重试仍被拒 → 原样上抛且重试用的是新凭据；无账号仍返回空（既有容忍语义不变）；**锁复用**（等锁期间他处续好 → 不发第二次续期请求、复用新凭据）；聊天路径用同一份 400/APIG.0602 夹具也触发一次静默续期重试（锁「两路径共用判据」）。夹具的 DPoP 私钥用 `generateDpopKeyPair()` 本地生成（占位 JWK 过不了 jose 的真实 ES256 导入），全程不联网、不读真实账号。
+
+  4. **真实网络验收（只读，不触碰运行中的 profile）**：读本机 `C:/Users/Xuan/.dsh`（state.json + .credentials.yaml + 复制 ledger.sqlite 到临时目录）：codearts 唯一账号的凭据此刻有效（至 2026-10-29T14:28:52Z，续期材料齐全）—— 报障窗口已被宿主他处续期度过；`catalog:codearts:*` 快照 20:59 刷新成功（7 模型、无 error）。用真实凭据直打修复后的 `fetchCodeArtsRemoteModels`：**恰好 1 个请求**（`/v1/model/builtin`）、7 个模型、无鉴权错误。**未做真实续期回路**：refresh_token 的消费权属于正在运行的宿主，脚本外续期会把宿主盘上的旧 refresh_token 烧掉（AGENTS.md「不得修改正在运行的 profile」），续期编排由合成夹具锁定；宿主需重载插件（重启或 dev 热重载）才会载入新 `dist/`。诊断脚本存 `.cache/codearts-directory-live.mjs`（不入库，惯例同先前的 live 夹具）。
+
+  5. `npm run check` 全绿（类型检查干净；核心 147、错误链 109、客户端 33、宿主 5、安装包 9 文件）。构建产物核对：`dist/index.js` 含 `CodeArtsCatalogAuthError`（5 处）与 `isCodeArtsAuthFailure`（4 处）。
+
+  6. **未验证 / 未改动**：未做多账号目录回退（沿旧语义取第一个可解析账号）；未在真实宿主里复现「过期 → 自动续期 → 目录恢复」端到端（需等下一次真实过期窗口，或宿主重载后观察）；未改 `directoryFetch` 对 STS 续期请求失败的错误归因（它会记成「目录 HTTP …」，但 discover 在读取前就已抛出更准确的续期错误，不影响最终文案）。
+
 - **码道免费权益（benefit）通道下线后的清理**（2026-10-28，用户报障「gateway/config 返回 4000」）：
 
   1. **端点不可修，是上游关了通道**：`opengw gateway/config` 恒返回 `HTTP 200` + `{"error_code":"4000","error_msg":"invalid channel, group not found"}`（`result` 为 null）。实测排除参数问题：`channel` / `group` 的各种取值（`codearts` / `deveco` / `agent` / `benefit` / `free`，及 `group_id` / `channel_id` 命名）**响应完全一致**；排除签名问题：把额外头传入 `signRequestHuawei` 的 `extraHeaders` 时会参与 canonical 计算导致 `401 APIG.0301 verify ak sk signature fail`，连 `builtin` 对照组都失败，改成不参与签名后对照组恢复 200、而 `gateway/config` 仍 4000。同一通道的兄弟端点一并失效：`/api/v1/user/tokens/balance` 同样 4000、`/v1/benefit-gateway-config` 直接 `APIG.0101 API does not exist`。另有第三方逆向项目 [CodeArts2API](https://github.com/2951461586/CodeArts2API) 在 2026-10-21 记录了完全相同的三个端点与 `4000`，并明确写「免费权益通道已于 2026-10 下线」。

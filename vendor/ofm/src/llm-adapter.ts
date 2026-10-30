@@ -10,7 +10,7 @@ import { AccountPool, providerCatalogVisible } from './account-pool.js'
 import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { settingsNamespaceFor } from './settings-compat.js'
 import { nextUtc8DayStartMs } from './model-queue.js'
-import { isCodeArtsBenefitModel, isVisualModelId } from './models.js'
+import { isCodeArtsBenefitModel, isCodeArtsAuthFailure, isVisualModelId } from './models.js'
 import { normalizeHarnessMessages } from './message-shape.js'
 import { signRequestHuawei } from './sign.js'
 import { createBlankReasoningSuppressor, createReasoningLoopDetector, hasUsableToolName, isReasoningLoopGuardEnabled, isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, reasoningLoopFailure, resolveEmptyResponseReason, resolveToolPairing, stripCourseLeakFromHistoryContent, stripCourseLeakIfEnabled } from './sse.js'
@@ -472,16 +472,22 @@ function isQueueError(status: number, body: string): boolean {
 
 /**
  * 判断 HTTP 错误是否表示凭据已失效、可通过 refresh_token 续期后重试。
+ *
+ * ⚠️ **判据本体已收敛到 `models.ts` 的 `isCodeArtsAuthFailure`**（2026-10-29）：
+ * 目录路径此前没有这份判据，同一个 APIG.0602 在聊天请求上触发静默续期
+ * 自愈、在目录请求上却被吞成空列表（用户报障「目录 HTTP 400：code
+ * APIG.0602」的根因）。这里保留薄封装仅为既有调用点与注释语境。
+ *
  * CodeArts 经华为 APIG 网关鉴权：SecurityToken 过期/无效时网关返回
- * `APIG.0602`（"Invalid token"），HTTP 状态通常是 401，但也观察到 403。
+ * `APIG.0602`（"Invalid token"），HTTP 状态不固定 —— 聊天路径实测 401/403，
+ * 目录路径实测 400，判据同时看状态码与响应体。
  * 本适配器在入口已按 expires_at 预判过期，但 SecurityToken 可能被后端
  * 提前吊销、或本地时钟与签发端有偏差——此时首次请求会命中本错误。
  * 策略：触发一次静默 refresh，用新 AK/SK/SecurityToken 重试一次；仍失败
  * 才抛 AUTH，避免把可自愈的瞬时鉴权失败暴露给用户。
  */
 function isAuthError(status: number, body: string): boolean {
-  if (status === 401 || status === 403) return true
-  return body.includes('APIG.0602') || /invalid\s+token|token\s+expired|token\s+is\s+invalid/i.test(body)
+  return isCodeArtsAuthFailure(status, body)
 }
 
 /**
@@ -1297,6 +1303,8 @@ export class CodeArtsAdapter extends LlmAdapter {
         // 鉴权失败（SecurityToken 过期/被吊销/APIG.0602）：刷新一次凭据后
         // 重试整个 chat 请求。入口的 expires_at 预判无法覆盖后端提前吊销
         // 或时钟偏差场景，这里做兜底，避免把可自愈的鉴权失败抛给用户。
+        // （目录路径的同款自愈见 `service.ts` 的 `refreshModels`；判据共用
+        // `isCodeArtsAuthFailure` —— 目录侧实测过 HTTP 400 形态的 APIG.0602。）
         if (isAuthError(response.status, errorText) && !authRefreshed) {
           authRefreshed = true
           await this.options.refresh()
