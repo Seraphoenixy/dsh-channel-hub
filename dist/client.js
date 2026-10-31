@@ -580,7 +580,18 @@
                 "\u6CA1\u6709\u53EF\u66F4\u65B0\u7684\u6E20\u9053\uFF1A\u5DF2\u6DFB\u52A0\u8D26\u53F7\u7684\u6E20\u9053\u4E3A 0" + (skipped.length ? "\uFF08" + skipped.map(channelName).join("\u3001") + " \u8FD8\u6CA1\u6709\u8D26\u53F7\uFF09" : "") + "\u3002"
               );
             else {
-              const parts = ["\u5DF2\u66F4\u65B0 " + refreshed + "/" + total + " \u4E2A\u6E20\u9053"];
+              const refreshedAccounts = Number(result?.refreshedAccounts ?? 0);
+              const partial = result?.partial && typeof result.partial === "object" ? result.partial : {};
+              const parts = [
+                "\u5DF2\u66F4\u65B0 " + refreshed + "/" + total + " \u4E2A\u6E20\u9053" + (refreshedAccounts > 0 && refreshedAccounts !== refreshed ? "\uFF08" + refreshedAccounts + " \u4E2A\u8D26\u53F7\u6210\u529F\uFF09" : "")
+              ];
+              const partialEntries = Object.entries(partial);
+              if (partialEntries.length)
+                parts.push(
+                  partialEntries.map(
+                    ([id, n]) => channelName(id) + " \u5237\u65B0 " + n + " \u4E2A\u8D26\u53F7"
+                  ).join("\u3001")
+                );
               if (skipped.length)
                 parts.push("\u8DF3\u8FC7 " + skipped.length + " \u4E2A\uFF08\u6CA1\u6709\u8D26\u53F7\uFF09");
               if (failures.length) {

@@ -426,7 +426,35 @@ window.__ModuleLoader__.load({
                 "。",
             );
           else {
-            const parts = ["已更新 " + refreshed + "/" + total + " 个渠道"];
+            /**
+             * 成功读数用**账号口径**（2026-10-30 修）：多账号渠道一半成功
+             * 一半失败时，渠道口径会把整个渠道计成失败 —— 但成功账号的
+             * 目录确实刷了（快照 updated 已更新、新模型已入菜单），结果行
+             * 说「失败」等于否认已发生的事实，用户以为白点了。宿主现在按
+             * 快照逐个回报 `refreshedAccounts`（成功账号数）与 `partial`
+             * （渠道 → 成功/总数），这里如实拼出。
+             */
+            const refreshedAccounts = Number(result?.refreshedAccounts ?? 0);
+            const partial: Record<string, string> =
+              result?.partial && typeof result.partial === "object"
+                ? result.partial
+                : {};
+            const parts = [
+              "已更新 " + refreshed + "/" + total + " 个渠道" +
+                (refreshedAccounts > 0 && refreshedAccounts !== refreshed
+                  ? "（" + refreshedAccounts + " 个账号成功）"
+                  : ""),
+            ];
+            const partialEntries = Object.entries(partial);
+            if (partialEntries.length)
+              parts.push(
+                partialEntries
+                  .map(
+                    ([id, n]) =>
+                      channelName(id) + " 刷新 " + n + " 个账号",
+                  )
+                  .join("、"),
+              );
             if (skipped.length)
               parts.push("跳过 " + skipped.length + " 个（没有账号）");
             if (failures.length) {

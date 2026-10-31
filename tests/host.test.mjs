@@ -631,6 +631,42 @@ test(
         "the UI needs the promotion window, not just the discounted price",
       );
       assert.equal(snapshot.promotion?.rate, "免费");
+      /**
+       * 部分失败的渠道按**账号快照**分别计（2026-10-30，用户报障「更新模型
+       * 部分失败，也得把成功的那部分状态正确刷新了」）。
+       *
+       * 本夹具天然就是「一半成功一半失败」：workbuddy 两个账号，WORKBUDDY_OK
+       * 的 /v3/config 正常、WORKBUDDY_FAIL 的 500。旧口径把整个渠道计成
+       * 失败（`refreshed` 不含它），但 WORKBUDDY_OK 的目录确实刷新了 ——
+       * 结果行否认已发生的事实。现在要求：
+       * 1. `refreshedAccounts` 把成功账号数如实回报（成功账号计入，
+       *    workbuddy 的坏账号不计）；
+       * 2. `partial` 点名该渠道「成功/总数」（`workbuddy: "1/2"`）；
+       * 3. `failures` 照旧点名坏账号的快照错误；
+       * 4. 桶互斥性以**渠道**口径维持（refreshed + failures + skipped =
+       *    total）—— 部分失败渠道归入 failures 桶，其成功账号只进
+       *    `refreshedAccounts`，两套口径不混。
+       */
+      const bulkPartial = await plugin.dispatch("models.refresh", {});
+      assert.equal(
+        bulkPartial.partial?.workbuddy,
+        "1/2",
+        "a half-success channel must report how many accounts actually refreshed: " +
+          JSON.stringify(bulkPartial),
+      );
+      assert.ok(
+        (bulkPartial.refreshedAccounts ?? 0) >= 1,
+        "successful accounts must be counted even when their channel reports a failure",
+      );
+      assert.equal(
+        bulkPartial.refreshed + bulkPartial.failures.length + bulkPartial.skipped.length,
+        bulkPartial.total,
+        "channel buckets stay mutually exclusive; account counts live in refreshedAccounts",
+      );
+      assert.ok(
+        bulkPartial.failures.some((f) => f.startsWith("workbuddy：")),
+        "the failing account's snapshot error must still be named",
+      );
       await plugin.dispatch("models.setDisabled", {
         provider: "workbuddy",
         models: ["gpt-5.5"],

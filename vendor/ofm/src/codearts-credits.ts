@@ -138,6 +138,10 @@ const SNAP_EXTRA_HEADERS: Readonly<Record<string, string>> = {
  * `statistics/plugin` 的 `metrics[]` 用 `name` 区分口径，IDE 从其中四项读取
  * 积分数（`accountInfoPane.js` 的 `apply`）：
  * `usageTotalPackageCredit` 是总额，其余三项是分类明细。
+ *
+ * ⚠️ 「总积分包」条目**只作识别键**（让 `parseCreditBalance` 认出「该账户有
+ * 积分口径」并取到总额锚点），它的展示名不再被使用 —— 合计口径不进资源包
+ * 列表（见 `parseCreditBalance` 的注释），卡片上不会出现这个包名。
  */
 const CREDIT_METRIC_LABELS: Readonly<Record<string, string>> = {
   usageTotalPackageCredit: '总积分包',
@@ -384,6 +388,14 @@ async function signedSnapRequest(
  * —— 分类（基础/按需/赠送）是总额的构成明细，相加会重复计算。
  * 总额 metric 缺失时才回退为分类求和。
  *
+ * ⚠️ **「总积分包」本身不是资源包，绝不能进 `packages`**（2026-10-30 用户报障
+ * 「积分统一有问题，总积分包好像就是合计值不应被再次做加法」）：它曾与三条
+ * 分类包并列下发，宿主按「各包剩余相加」汇总时把它又加了一遍，卡片总额变成
+ * 「分类之和 + 总额」≈ 两倍。宿主侧的合约是 `CreditBalance.total` 等于各
+ * **有效**包剩余之和（见 `credits.ts` 的字段注释），非可加的合计口径不能作为
+ * 包参与求和 —— 故这里只把它用作 `total` 的锚点，包列表只留**可加**的分类
+ * 明细；分类各带 `package_credit_amount` 面值，宿主照常画出逐包与合计进度。
+ *
  * 没有任何 credit metric 时返回 `undefined`（= 该账户没有积分口径），
  * 与 `total: 0`（有口径但余额为 0）严格区分。
  */
@@ -404,7 +416,12 @@ function parseCreditBalance(metrics: unknown): CreditBalance | undefined {
     const amount = readNumber(record, 'package_credit_amount')
     const used = readNumber(record, 'package_credit_used')
     const remain = readNumber(record, 'package_credit_remain')
-    if (name === TOTAL_CREDIT_METRIC) totalRemain = remain
+    if (name === TOTAL_CREDIT_METRIC) {
+      // 合计只做 `total` 锚点：它与分类是「总额与构成」的关系，进包列表
+      // 会被宿主再求和一次（真实缺陷，见上方注释）。
+      totalRemain = remain
+      continue
+    }
     // 额度为 0 的分类不列为资源包：列出来只会让「N 个资源包」虚高。
     if (amount <= 0 && remain <= 0) continue
     packages.push({

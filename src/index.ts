@@ -359,6 +359,18 @@ export async function apply(ctx: any) {
        * 空账号列表返回 `[]`，它既没失败也没做事；旧实现把它计进 `refreshed`，
        * 于是 9 个渠道里 7 个没账号时界面显示「已更新 8/9」——用户点完看不到
        * 任何变化，还以为按钮坏了。现在这类渠道单列成 `skipped`。
+       *
+       * ⚠️ **部分失败的渠道按账号快照分别计**（2026-10-30 修，用户报障
+       * 「更新模型部分失败，也得把成功的那部分状态正确刷新了」）。
+       * 多账号渠道一半成功一半失败时，旧口径把整个渠道计成失败
+       * （`refreshed` 不加、`failures` 记一条）—— 成功账号的目录**确实刷了**
+       * （快照 `updated` 已更新、新模型已入菜单），但结果行说「失败」，
+       * 用户以为白点了。真实复现（dist + 双账号 workbuddy 夹具，wb-fail
+       * 端点 500）：旧口径 `refreshed: 0`，实际 `wb-ok` 已拿到 `gpt-5.5-new`。
+       * 现在按快照逐个计：有 `error` 的进失败明细、无 `error` 的计入
+       * `refreshed`（渠道级数取整：全成功才 +1；部分成功时失败照报、
+       * 成功账号数并入 `partial`），界面能同时看到「刷了几个账号」与
+       * 「哪几个账号没刷成」。
        */
       if (p.provider === undefined || p.provider === null) {
         const targets = [...engine.drivers.values()].filter(
@@ -369,7 +381,10 @@ export async function apply(ctx: any) {
         );
         const failures: string[] = [];
         const skipped: string[] = [];
+        /** 部分成功的渠道：id → 成功账号数/总账号数（界面拼「刷新 N/M」）。 */
+        const partial: Record<string, string> = {};
         let refreshed = 0;
+        let refreshedAccounts = 0;
         settled.forEach((result: any, i: number) => {
           const id = targets[i].id;
           if (result.status === "rejected") {
@@ -387,22 +402,38 @@ export async function apply(ctx: any) {
             return;
           }
           const failed = snapshots.filter((s: any) => s?.error);
-          if (failed.length > 0) {
-            failures.push(
-              id +
-                "：" +
-                [...new Set(failed.map((s: any) => redact(s.error)))].join("；"),
-            );
+          refreshedAccounts += snapshots.length - failed.length;
+          if (failed.length === 0) {
+            refreshed++;
             return;
           }
-          refreshed++;
+          /**
+           * 部分失败：成功账号照常计入 `refreshedAccounts`（他们的快照
+           * `updated`/新模型已落库，这是事实，结果行不能否认）；失败账号
+           * 点名进 `failures`。全失败的渠道不进 `partial`——它没有任何
+           * 成功部分，与普通失败同列即可，避免三态口径重叠。
+           */
+          if (snapshots.length > failed.length)
+            partial[id] = snapshots.length - failed.length + "/" + snapshots.length;
+          failures.push(
+            id +
+              "：" +
+              [...new Set(failed.map((s: any) => redact(s.error)))].join("；"),
+          );
         });
         // 全部失败才抛错；部分失败只报告，成功的渠道照常更新。
         if (failures.length === targets.length && targets.length > 0)
           throw Error("全部渠道目录更新失败：" + failures.join("；"));
         // ⚠️ 目录快照变了 ⇒ 模型菜单必须重读，否则界面显示新目录、菜单还是旧的。
         ctx.emit("llm/adapters-updated");
-        return { refreshed, failures, skipped, total: targets.length };
+        return {
+          refreshed,
+          refreshedAccounts,
+          ...(Object.keys(partial).length > 0 ? { partial } : {}),
+          failures,
+          skipped,
+          total: targets.length,
+        };
       }
       const d = engine.drivers.get(p.provider);
       if (!d?.reload) throw Error(d?.error ?? "Unknown channel");

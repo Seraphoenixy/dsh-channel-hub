@@ -21460,7 +21460,10 @@ function parseCreditBalance(metrics) {
     const amount = readNumber5(record, "package_credit_amount");
     const used = readNumber5(record, "package_credit_used");
     const remain = readNumber5(record, "package_credit_remain");
-    if (name2 === TOTAL_CREDIT_METRIC) totalRemain = remain;
+    if (name2 === TOTAL_CREDIT_METRIC) {
+      totalRemain = remain;
+      continue;
+    }
     if (amount <= 0 && remain <= 0) continue;
     packages.push({
       name: label,
@@ -23383,7 +23386,9 @@ async function apply(ctx) {
         );
         const failures = [];
         const skipped = [];
+        const partial = {};
         let refreshed = 0;
+        let refreshedAccounts = 0;
         settled.forEach((result, i) => {
           const id = targets[i].id;
           if (result.status === "rejected") {
@@ -23396,18 +23401,28 @@ async function apply(ctx) {
             return;
           }
           const failed = snapshots.filter((s) => s?.error);
-          if (failed.length > 0) {
-            failures.push(
-              id + "\uFF1A" + [...new Set(failed.map((s) => redact(s.error)))].join("\uFF1B")
-            );
+          refreshedAccounts += snapshots.length - failed.length;
+          if (failed.length === 0) {
+            refreshed++;
             return;
           }
-          refreshed++;
+          if (snapshots.length > failed.length)
+            partial[id] = snapshots.length - failed.length + "/" + snapshots.length;
+          failures.push(
+            id + "\uFF1A" + [...new Set(failed.map((s) => redact(s.error)))].join("\uFF1B")
+          );
         });
         if (failures.length === targets.length && targets.length > 0)
           throw Error("\u5168\u90E8\u6E20\u9053\u76EE\u5F55\u66F4\u65B0\u5931\u8D25\uFF1A" + failures.join("\uFF1B"));
         ctx.emit("llm/adapters-updated");
-        return { refreshed, failures, skipped, total: targets.length };
+        return {
+          refreshed,
+          refreshedAccounts,
+          ...Object.keys(partial).length > 0 ? { partial } : {},
+          failures,
+          skipped,
+          total: targets.length
+        };
       }
       const d = engine.drivers.get(p.provider);
       if (!d?.reload) throw Error(d?.error ?? "Unknown channel");

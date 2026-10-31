@@ -4,6 +4,30 @@
 
 ## 已完成
 
+- **码道「总积分包」被重复求和，积分读数翻倍**（2026-10-30，用户报障「华为码道的积分统一有问题，总积分包好像就是合计值不应被再次做加法」）：
+
+  1. **根因：合计口径混进了资源包列表**。`statistics/plugin` 的 `metrics[]` 里 `usageTotalPackageCredit`（总积分包）是**合计**，`usageBasicPackageCredit` / `usageOnDemandPackageCredit` / `usageBonusPackageCredit` 三条是它的**构成明细**；vendor 的 `parseCreditBalance`（`vendor/ofm/src/codearts-credits.ts`）把四条全部 push 进 `CreditBalance.packages`，只把总积分包的余额单独记作 `total`。宿主（`src/core/credits.ts`）的汇总合约是「`total` = 各有效包剩余之和」，于是卡片总额 = 分类之和 + 总额 ≈ 两倍。真实凭据实测：总额锚点 8506.86、基础 500 + 赠送 8006.86，旧实现显示 **17013.72（恰好 ×2）**，与 IDE 顶部口径直接对不上。
+
+  2. **改动**（`vendor/ofm/src/codearts-credits.ts`，一处）：`usageTotalPackageCredit` 只做 `total` 的锚点（`continue`，不进 `packages`），包列表只留**可加**的分类明细——分类各带 `package_credit_amount` 面值，宿主照常画出逐包与合计进度；总额 metric 缺失时回退分类求和的既有逻辑不变；「总积分包」仍留在 `CREDIT_METRIC_LABELS` 里作识别键（认定「该账户有积分口径」）。宿主 `src/core/credits.ts` 无需改动——它的求和合约本来就是对的，错的是喂进去的包列表。
+
+  3. **测试**（新增 `tests/codearts-credits.test.mjs` 6 项，接入 `test:errors`，现 122 项全绿）：总积分包不进包列表且 `total` == 分类之和（端到端：vendor 解析 → 宿主 `creditReading`，卡片读数 `155.67 / 400积分` 恰好一次求和）；分类与总额口径漂移时取服务端声明的总额、不再加工；总额缺失回退分类求和（面值未知 ⇒ 无进度条）；只有总积分包时仍有积分口径（`total: 88` 如实显示，非 undefined）；无 credit metric 仍返回无积分口径（`credit: undefined` → 「积分账户，但本次响应没有额度明细」）。夹具全合成、不联网、不读真实账号。
+
+  4. **真实网络验收（只读 GET，不触碰运行中的 profile，不打印凭据）**：读本机 `C:/Users/Xuan/.dsh/.credentials.yaml` 的 codearts 凭据（有效至 2026-10-30T09:09:35Z），直打修复后的 `fetchCodeArtsAccountInfoDetailed`：套餐「体验版」，总额锚点 **8506.86**，包列表 = 基础 500/500 + 赠送 8006.86/11100（按需额度 0 被既有规则剔除），**包求和 8506.86 == 锚点**；旧实现会显示 17013.72。诊断脚本存 `.cache/codearts-credits-live.mjs`（不入库，惯例同先前 live 夹具）。
+
+  5. `npm run check` 全绿（类型检查干净；核心 147、错误链 122、客户端 33、宿主 5、安装包 9 文件）。构建产物核对：`dist/index.js` 的 `parseCreditBalance` 对 `usageTotalPackageCredit` 记锚点后 `continue`（不再进包列表）。
+
+  6. **未验证 / 未改动**：未改 `channel-pack-rpc.ts` 的领取流程（它只读 `info.isCreditPackage` 与签到活动，不消费包列表）；未动三条分类的展示名与零额度剔除规则；宿主需重载插件（重启或 dev 热重载）才会载入新 `dist/`。
+
+- **更新模型部分失败时，成功部分的状态与计数如实上浮**（2026-10-30，用户报障「更新模型部分失败，也得把成功的那部分状态正确刷新了」）：
+
+  1. **先复现、再定性**（真实 dist + 合成上游，脚本存 `.cache/partial-refresh-*.mjs` 不入库）：数据层**本来就是对**的 —— 多账号渠道一半成功一半失败时，成功账号的快照 `updated` 刷新到 0 秒前、新模型入菜单（`llm.listModels` 立即可见）、失败账号保留旧快照 + `stale` + `error`；`CatalogService.refresh` 的逐账号落库与 `hydrate` 的并集兜底各自正确。真正的缺陷在**结果口径**：`models.refresh`（全渠道）的聚合把「有任一账号失败」的渠道整体计成失败 —— `refreshed` 不加、`failures` 记一条，成功账号的刷新**不被计数**。真实复现（workbuddy 双账号，`WORKBUDDY_FAIL` 的 `/v3/config` 500）：旧口径返回 `refreshed: 0`，实际 `wb-ok` 已拿到新模型 `gpt-5.5-new`。用户点完按钮看到「失败 1 个」，以为整个渠道白刷了 —— 结果行在**否认已发生的事实**。
+
+  2. **改动**（`src/index.ts` + `src/client.ts`）：① 宿主聚合改按**账号快照**分别计 —— 新增 `refreshedAccounts`（成功账号总数，含部分失败渠道里的成功账号）与 `partial`（`渠道 → "成功/总数"`，仅部分失败渠道出现）；**渠道三桶（refreshed / failures / skipped）互斥性不变**（部分失败渠道仍归 failures 桶），两套口径不混，`refreshAllModels` 的「全部失败才抛错」语义不变。② 界面结果行读新字段：`已更新 0/9 个渠道（1 个账号成功）` + `WorkBuddy (国际版) 刷新 1/2 个账号` + 失败点名 —— 成功与失败同时可见，谁刷了谁没刷一目了然。
+
+  3. **测试**：`tests/host.test.mjs` 的双账号 workbuddy 用例（天然一半成功一半失败）增 4 断言 —— `partial.workbuddy === "1/2"`、`refreshedAccounts >= 1`、渠道桶互斥等式成立、坏账号的快照错误照旧点名；`tests/client.test.mjs` 增 3 断言（界面读 `refreshedAccounts`、「N 个账号成功」「刷新 N 个账号」文案在构建产物中存在）。`npm run check` 全绿（核心 147、错误链 116、客户端 33、宿主 5、安装包 9 文件）。
+
+  4. **未验证 / 未改动**：单渠道口径（`models.refresh` 带 `provider`）仍返回快照数组，由调用方（面板）自行展示，未加同款聚合；排查中发现的「复现脚本进程不退出」是宿主常驻定时器未 `unref`（对插件无害，宿主进程本就长存），未处理；失败账号的旧模型仍进菜单是既有兜底设计（`hydrate` 取并集，防模型凭空消失），保持不变。
+
 - **raccoon 413 10MB / qoder 413 50MB：图片「请求版本」桥接缺失**（2026-10-29，用户报障「form_generate 工作区 raccoon: request body exceeds 10MB；qoder: code=413 Request body size exceeds maximum allowed 52428800 bytes；上下文也不大啊」）：
 
   1. **根因是插件实现的接线缺失，且不在文本上下文**。体积全部来自**图片附件的 base64 内联**：适配器把会话历史里的每张图按 `readImage` 的**原始字节**编进请求体，每轮全量重发。账本实证（只读复制 `ledger.sqlite`）：两条报障错误来自**同一个会话** `session-b5728ff1…` —— raccoon 连续 17 轮成功（12:53–13:04）后，13:07:02 / 13:08:13 连续 `request body exceeds 10MB`；切换渠道后 qodercn 于 13:19:02 撞 `Request body size exceeds maximum allowed 52428800 bytes`（50MB，此时积累的图更多）。这正是「图片随会话累积、每轮全量重发」的形态；**该会话 token 用量很低（raccoon 不回 usage，但同窗的 codearts/qodercn 成功请求 input 数百到数千）**，「上下文不大」的直觉正是对的部分：撑爆请求体的从来不是文本。

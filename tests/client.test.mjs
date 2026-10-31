@@ -751,6 +751,26 @@ test("the refresh-all action reports its result and survives the reload", () => 
     loadAt < noticeAt,
     "load() clears the error slot — writing the result before it loses the message",
   );
+  /**
+   * 部分失败按**账号口径**如实报（2026-10-30，用户报障「更新模型部分失败，
+   * 也得把成功的那部分状态正确刷新了」）：多账号渠道一半成功一半失败时，
+   * 渠道口径把整个渠道计成失败 —— 但成功账号的目录确实刷了，结果行必须
+   * 同时说出「刷了几个账号」与「哪几个渠道失败」，不能否认已发生的事实。
+   */
+  assert.ok(
+    decoded.includes("refreshedAccounts"),
+    "the UI must read the per-account success count from the host result",
+  );
+  assert.match(
+    decoded,
+    /个账号成功/,
+    "the result line must surface how many accounts actually refreshed",
+  );
+  assert.match(
+    decoded,
+    /刷新 ["+ ]*n/,
+    "a half-success channel must be reported as 'refreshed N accounts', not as a whole failure",
+  );
 });
 
 test("single-column layouts reclaim the column span", () => {
