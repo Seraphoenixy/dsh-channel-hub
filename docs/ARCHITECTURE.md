@@ -76,6 +76,9 @@ vendor 中保留来源快照用于比对；构建只跟随真实 import 图，�
 
 | 文件 | 改动 | 原因 | 验收 |
 |---|---|---|---|
+| `vendor/ofm/src/qoder-wasm.ts`、`qoder-adapter.ts` | 在固定 OFM 快照上补齐 WASM 资源释放。复制 URL 和请求体后释放返回字符串和结果对象，每次构造完成或失败后释放请求上下文。读取返回值时在调用 getter 后重新取得内存视图 | 重复构造加密请求会累积未释放的内存，分配失败时可在发出 HTTP 前触发 `unreachable`。国区和国际版共用此实现 | `tests/qoder-errors.test.mjs`、`docs/ACCEPTANCE.md` 2026-11-06 |
+| `vendor/ofm/src/trae-adapter.ts` | 新增 `traeCacheCount()` 与缓存字段候选表（Anthropic / DeepSeek / OpenAI 三套命名，镜像值取最大）；`token_usage` 的缓存读/写**只在计数非零，或 `metadata.prompt_cache_pool_record` 非空**（上游明说本次挂了缓存池）时才下发 | Trae CN 自 2026-10-27T23:07（+08）起把 `cache_read_input_tokens` / `cache_creation_input_tokens` 恒填 0，且 `metadata` 明说未分配缓存池；把 0 当「测量到的未命中」会让 Trae 命中率恒为 0%，正是「缓存命中率未正确统计」的报障形态。池记录一恢复非空，真实 0% 自动回来。宿主既有的「未知不计零」口径（`cacheSamples` / `cacheCoverage`）承载这个区分 | `docs/ACCEPTANCE.md` 2026-11-02；`tests/trae-cache.test.mjs` 10 项 |
+| `vendor/ofm/src/trae.ts` | `TraeSSEEvent` 增加 `cachePoolRecord`，`parseTraeSSELine` 的 `metadata` 分支用 `in` 判定键是否存在后取值 | 字段缺失（老版本上游没有这套机制）与显式 `null`（明确说本次没挂缓存池）是两种结论，取值判空会把它们合成一个 undefined；适配器的采信判据需要这个区分 | 同上 |
 | `vendor/ofm/src/trae-product.ts` | `resolveMaxModeFlag` 改回复用 `isTruthyFlag`（`DSH_TRAE_MAX_MODE` **默认关**）；`TraeProduct.maxMode` 的文档改写 | 目录只下发一个 `consumption_rate`，没有 Max 档倍率字段；默认开启等于替用户选一个价格未知的档位 | `docs/ACCEPTANCE.md` 2026-10-24 第 1 项；`tests/trae-context.test.mjs` 的「defaults Max mode to off」 |
 | `vendor/ofm/src/trae-adapter.ts` | `maxModeFor` 增加「远端必须下发 `context_window_tokens.max`」判据；`contextWindowFor` 不再用 `TRAE_MAX_CONTEXT_TOKENS` 补位；新增 `maxTierFor` / `maxModeEnabled` / `setMaxModeEnabled` | 原 `?? 1_000_000` 会给「只标了 `max_mode`、没给窗口」的模型凭空声明 1M（实测 `kimi-k2.6`，dev 仅 116000） | 同上第 2、3 项；`tests/trae-context.test.mjs` 的「refuses Max mode when the remote flags it without a window」 |
 | `vendor/ofm/src/trae.ts` | `traeMaxModeFields` 在 `maxContext` 非正数时返回 `undefined`；新增 `readOffPeakDiscount` / `TraeOffPeakDiscount` / `TraeTimeWindow`，`TraeRemoteModel.offPeak`，`readActivityDiscount` 在时段折扣可解析时让位 | 窗口是上游准入参数，编一个必然被拒或静默截断；时段折扣的 `current` 是抓取快照（实测 `DeepSeek-V4-Flash-Official` 的 `current.discount_type` 是 `none` 却带 00:00–08:00 / 22:00–24:00 半价），旧实现整条丢弃 | `tests/trae-context.test.mjs` 的「refuses to invent a context window」；`tests/trae-offpeak.test.mjs` 16 项 + `tests/trae-offpeak-live.test.mjs` 3 项（真实快照） |
@@ -94,3 +97,9 @@ vendor 中保留来源快照用于比对；构建只跟随真实 import 图，�
 ## 边界
 
 没有自动安装、真实账号导入或部署操作。浏览器入口目前完成构建、组件注册与模拟状态的静态布局检查，尚未完成真实桌面窗口的视觉与交互验收。各渠道真实登录、余额、领取、续期、推理必须逐项补充验收记录。`src/reload.ts` 只在存在 `src/index.ts` 的检出中启用，安装包不包含源码；首次启用仍需重启 DSH。
+
+### 渠道 User-Agent（2026-11-04）
+
+渠道请求通过 src/drivers/user-agent.ts 统一处理 UA：保留 OFM 已设置的产品身份；缺失、空值或包含 deepseek-harness/ 产品 token 时，使用 dsh-channel-hub/<package.json 版本> (+项目地址)。入口在 src/drivers/ofm.js，覆盖注入的认证/续期、目录、推理、余额及领取请求，不修改全局 fetch 或 vendor。Request 与 init.headers 遵循 fetch 原有覆盖语义。认证头、签名、请求体及设备身份不变。DSH attributionHeaders 支持自定义身份；默认产品名不是不可覆盖的协议要求。
+
+TM.00000001 仅能证明上游报告繁忙，不能单凭错误码判定瞬时容量；重复相同 UA 的退避不构成指纹拒绝的修复。UA 改动的离线验证与真实上游验收必须分开。

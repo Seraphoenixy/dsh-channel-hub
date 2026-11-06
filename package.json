@@ -1,6 +1,6 @@
 {
   "name": "dsh-channel-hub",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "DSH 渠道中心：账号、动态目录、用量与请求日志",

@@ -1903,6 +1903,15 @@ export interface TraeSSEEvent {
   finishReason?: string
   errorCode?: number
   errorMessage?: string
+  /**
+   * `metadata` 事件里的 `prompt_cache_pool_record`。
+   *
+   * ⚠️ **`undefined`（该帧没有这个键）与 `null`（明确说没有池）含义不同** ——
+   * 对齐 `dsh-connect-trae` 4.6.4 的判读：非空才代表本次请求挂了缓存池。
+   * 适配器据它决定 `token_usage` 里的缓存计数能不能按「测量值」采信
+   * （见 `trae-adapter.ts` 的 `traeCacheCount`）。
+   */
+  cachePoolRecord?: unknown
 }
 
 /**
@@ -1937,6 +1946,11 @@ export function parseTraeSSELine(eventName: string, dataLine: string): TraeSSEEv
       break
     case 'token_usage':
       ev.usage = raw
+      break
+    case 'metadata':
+      // ⚠️ 用 `in` 而不是取值判空：字段缺失（老版本上游没有这套机制）与显式
+      // `null`（明确说本次没挂缓存池）在适配器里是两种结论，不能混成一个 undefined。
+      if ('prompt_cache_pool_record' in raw) ev.cachePoolRecord = raw.prompt_cache_pool_record
       break
     case 'done':
       if (typeof raw.finish_reason === 'string') ev.finishReason = raw.finish_reason

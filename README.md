@@ -4,12 +4,12 @@ DeepSeek Harness 插件，在一个侧边栏面板里管理多家模型渠道的
 
 登录后，目录发现、令牌续期、额度轮询与每日签到在后台进行；每次模型调用的账号、耗时、Token 与结果记入本地 SQLite。
 
-![version](https://img.shields.io/badge/version-0.1.0--alpha.1-orange)
+![version](https://img.shields.io/badge/version-0.1.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 ![node](https://img.shields.io/badge/node-22.19%2B-3c873a)
 
 > [!NOTE]
-> 当前为 alpha 版本。构建、核心回归与真实宿主契约测试已通过，各渠道的真实账号验收尚未逐项补齐，建议先用少量账号试用。结论见[验收记录](docs/ACCEPTANCE.md)。
+> 0.1.0 正式版。构建、核心回归与真实宿主契约测试已通过；各渠道的真实账号验收按项记录在[验收记录](docs/ACCEPTANCE.md)，其中尚未补齐的部分集中列在该文件的「未验证 / 未覆盖」一节 —— 标记正式版不改变这些结论，首次使用仍建议先用少量账号试用。
 
 ## 功能
 
@@ -55,8 +55,8 @@ dsh plugin --profile desktop add "D:\path\to\dsh-channel-hub"
 
 ```powershell
 npm install --ignore-scripts
-npm run pack:local          # → artifacts/dsh-channel-hub-0.1.0-alpha.1.tgz
-dsh plugin --profile desktop add ".\artifacts\dsh-channel-hub-0.1.0-alpha.1.tgz"
+npm run pack:local          # → artifacts/dsh-channel-hub-0.1.0.tgz
+dsh plugin --profile desktop add ".\artifacts\dsh-channel-hub-0.1.0.tgz"
 ```
 
 安装包含 `dist/`、`cordis.patch.yml`、`LICENSE`、`README.md` 与 `docs/ACCEPTANCE.md`，不含源码、凭据、数据库或日志。
@@ -90,7 +90,7 @@ dsh plugin --profile desktop add ".\artifacts\dsh-channel-hub-0.1.0-alpha.1.tgz"
 | 请求 / 尝试 | 一次模型生成是一条请求；重试与换号是它下面的尝试 |
 | 成功率 | 按最终请求统计，取消与进程中断单列 |
 | Token | 含失败尝试已报告的消耗；缺失 usage 不等于 0；思考已含在输出里，不重复累计 |
-| 缓存命中率 | 只用报告了缓存数据的样本，并给出覆盖率 |
+| 缓存命中率 | 只用**上游真的报了数**的样本，并给出覆盖率；上游把计数恒填 0 的渠道按「未知」处理，不记成 0% 未命中 |
 | 流式速度 | 输出 Token /（首字 → 结束），只有观测到首字才有样本 |
 | 整块吞吐 | 输出 Token /（请求开始 → 结束），含首字等待，总是可得 |
 
@@ -98,6 +98,7 @@ dsh plugin --profile desktop add ".\artifacts\dsh-channel-hub-0.1.0-alpha.1.tgz"
 - 按北京时间分日，跨日请求归入开始当天。
 - 轮次由「最后一条消息是否为纯用户消息」推断（宿主只下发 `sessionId`）。压缩、标题生成等旁路调用若也以用户消息结尾，会被算作新的一轮。
 - 明细保留 90 天，日汇总永久保留。
+- **Trae 的缓存计数自 2026-10-27T23:07（北京时间）起不再可信**：`token_usage` 里 `cache_read_input_tokens` / `cache_creation_input_tokens` 恒填 0，同时 `metadata` 事件的 `prompt_cache_pool_record` 恒为 `null`（上游明说本次没挂缓存池）。第三方证据见 `dingminhua/dsh-connect-trae#67`、`#69`、`yetone/magpie#3991`、`Ebony-Vinyl/dsh-our-free-model#701`。故本插件只在**上游明说挂了缓存池**（该记录非空）时把 0 当成「本次未命中」；否则一律按「未知」：日志与看板显示「—」，悬停给出「上游未分配缓存池」的原因，命中率分母只留报过数的样本、覆盖率如实下降。上游恢复分配缓存池后，0% 会自动回来，无需改代码。
 
 ## 数据与隐私
 
@@ -108,7 +109,7 @@ dsh plugin --profile desktop add ".\artifacts\dsh-channel-hub-0.1.0-alpha.1.tgz"
 
 ## 兼容性与验收状态
 
-**已通过**：构建、类型检查、安装包校验，以及 143 项核心 / 79 项错误链 / 29 项客户端 / 5 项真实宿主契约测试。宿主契约覆盖 `prepareCall` → Qoder WASM → SQLite 记账，以及 Gemini `thoughtSignature` 的捕获与回填。真实账号侧完成 Buddy 与 WorkBuddy 国际版最小推理、Trae 缓存命中、Qoder 账号名补齐、额度轮询与自动签到。
+**已通过**：构建、类型检查、安装包校验，以及 147 项核心 / 129 项错误链 / 34 项客户端 / 5 项真实宿主契约测试。宿主契约覆盖 `prepareCall` → Qoder WASM → SQLite 记账，以及 Gemini `thoughtSignature` 的捕获与回填。真实账号侧完成 Buddy 与 WorkBuddy 国际版最小推理、Trae 缓存用量（含 2026-10-27 那次上报缺口的抓帧与账单复测）、Qoder 账号名补齐、额度轮询与自动签到。
 
 **尚未验证**：上述条目之外的真实登录、续期、余额与推理；Qoder 只到「上游接受请求并返回业务错误」，未取得成功出字；Gemini 的完整工具调用循环；Trae Max 档的实际扣费倍率（上游不下发该字段）；运行中 DSH 窗口的逐页视觉与长时间压力测试。
 

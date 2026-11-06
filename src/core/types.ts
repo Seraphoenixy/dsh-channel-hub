@@ -26,6 +26,19 @@ export interface Attempt {
   outcome: Outcome;
   usage?: Usage;
   error?: string;
+  /**
+   * 上游的缓存池记录（Trae `event: metadata` 的 `prompt_cache_pool_record`）。
+   *
+   * ⚠️ **`null` 与「字段不存在」（`undefined`）含义不同**：
+   * - `null`：上游**明确**说本次请求没挂缓存池 —— 此时 `token_usage` 里的
+   *   缓存读/写计数不是测量值，界面按「未知」显示并给出这条原因；
+   * - `undefined`：该上游/该帧没有这套机制，不据此下结论；
+   * - 字符串：非空记录的 JSON 文本（已截断），表示本次挂了缓存池，
+   *   计数即使为 0 也是「本次未命中」的真实读数。
+   *
+   * 判读依据与实测见 `vendor/ofm/src/trae-adapter.ts` 的 `traeCacheCount`。
+   */
+  cachePool?: string | null;
 }
 export interface RequestRow {
   id: string;

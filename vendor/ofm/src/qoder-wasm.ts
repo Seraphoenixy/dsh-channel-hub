@@ -599,7 +599,7 @@ export async function decryptModelCatalog(encrypted: string, machineId: string):
 export class QoderEncryptedInfer {
   private constructor(
     private readonly g: Glue,
-    private readonly context: number,
+    private context: number,
     private readonly metadata: QoderClientMetadata,
     /** 加密端点所在 host（`agent_chat_generation`）。 */
     private readonly host: string,
@@ -646,6 +646,13 @@ export class QoderEncryptedInfer {
     return new QoderEncryptedInfer(g, context, options.metadata, options.host)
   }
 
+  dispose(): void {
+    const context = this.context
+    if (context === 0) return
+    this.context = 0
+    this.g.exports.__wbg_qodercontext_free!(context, 0)
+  }
+
   /**
    * 构造加密推理请求（url / headers / body）。
    *
@@ -654,6 +661,7 @@ export class QoderEncryptedInfer {
    * 覆盖会导致 `403 Signature invalid`。
    */
   prepareInfer(ask: QoderInferAsk): QoderInferRequest {
+    if (this.context === 0) throw new Error('Qoder WASM context has been disposed')
     const g = this.g
     const payload = buildQoderInferPayload(ask)
 
@@ -667,32 +675,37 @@ export class QoderEncryptedInfer {
       )
     })
 
-    const headerMap = g.takeObject(g.exports.requestresult_headers!(result))
-    const headers: Record<string, string> = {}
-    if (headerMap instanceof Map) {
-      for (const [k, v] of headerMap) headers[String(k)] = String(v)
-    }
-
     const readResultString = (invoke: (stack: number, ptr: number) => void): string => {
-      let out = ''
-      const v = g.view()
+      let ptr = 0
+      let len = 0
       const stack = g.exports.__wbindgen_add_to_stack_pointer!(-16)
       try {
         invoke(stack, result)
-        const ptr = v.getInt32(stack + 0, true)
-        const len = v.getInt32(stack + 4, true)
-        out = ptr ? g.readString(ptr, len) : ''
+        // 字符串 getter 可能扩容 WASM 内存，调用后再取视图。
+        const v = g.view()
+        ptr = v.getInt32(stack, true)
+        len = v.getInt32(stack + 4, true)
+        return ptr ? g.readString(ptr, len) : ''
       } finally {
         g.exports.__wbindgen_add_to_stack_pointer!(16)
+        if (ptr) g.exports.__wbindgen_export4!(ptr, len, 1)
       }
-      return out
     }
 
-    return {
-      // ⚠️ 参数顺序：(栈指针, ptr) —— 与直觉相反
-      url: readResultString((stack, ptr) => g.exports.requestresult_url!(stack, ptr)),
-      headers,
-      body: readResultString((stack, ptr) => g.exports.requestresult_body!(stack, ptr)),
+    try {
+      const headerMap = g.takeObject(g.exports.requestresult_headers!(result))
+      const headers: Record<string, string> = {}
+      if (headerMap instanceof Map) {
+        for (const [k, v] of headerMap) headers[String(k)] = String(v)
+      }
+      return {
+        // 参数顺序：(栈指针, ptr)。
+        url: readResultString((stack, ptr) => g.exports.requestresult_url!(stack, ptr)),
+        headers,
+        body: readResultString((stack, ptr) => g.exports.requestresult_body!(stack, ptr)),
+      }
+    } finally {
+      g.exports.__wbg_requestresult_free!(result, 0)
     }
   }
 }

@@ -1251,6 +1251,11 @@ var Observer = class {
       if (frame?.body !== void 0)
         frame = typeof frame.body === "string" ? JSON.parse(frame.body) : frame.body;
       if (!frame || typeof frame !== "object") return;
+      if ("prompt_cache_pool_record" in frame) {
+        const pool = frame.prompt_cache_pool_record;
+        if (pool === null) a.cachePool = null;
+        else a.cachePool = (JSON.stringify(pool) ?? String(pool)).slice(0, 200);
+      }
       const error = frame.error ?? (!Array.isArray(frame.choices) && frame.code !== void 0 && !["0", "200"].includes(String(frame.code)) ? frame.message ?? frame.msg : void 0);
       if (error) {
         a.outcome = "failed";
@@ -2284,6 +2289,109 @@ async function authorizationLink(loginUrl, open = openSystemBrowser) {
     return { loginUrl, browserOpened: false };
   }
 }
+
+// package.json
+var package_default = {
+  name: "dsh-channel-hub",
+  version: "0.1.0",
+  private: true,
+  type: "module",
+  description: "DSH \u6E20\u9053\u4E2D\u5FC3\uFF1A\u8D26\u53F7\u3001\u52A8\u6001\u76EE\u5F55\u3001\u7528\u91CF\u4E0E\u8BF7\u6C42\u65E5\u5FD7",
+  license: "MIT",
+  main: "./dist/index.js",
+  exports: {
+    ".": "./dist/index.js",
+    "./client": "./dist/client.js",
+    "./package.json": "./package.json"
+  },
+  files: [
+    "cordis.patch.yml",
+    "LICENSE",
+    "docs/ACCEPTANCE.md",
+    "dist/index.js",
+    "dist/client.js",
+    "dist/ledger-worker.js",
+    "dist/qoder-auth-wasm.wasm"
+  ],
+  engines: {
+    node: ">=22.19.0"
+  },
+  scripts: {
+    build: "node scripts/build.mjs",
+    dev: "node scripts/dev.mjs",
+    test: "node --import ./tests/resolve-vendor.mjs --test --experimental-transform-types tests/*.test.ts",
+    typecheck: "tsc --noEmit",
+    check: "npm run typecheck && npm test && npm run test:errors && npm run build && npm run test:client && npm run test:host && npm run test:package",
+    "test:client": "node --test tests/client.test.mjs",
+    "test:errors": "node --import ./tests/resolve-vendor.mjs --test --experimental-transform-types tests/qoder-errors.test.mjs tests/buddy-errors.test.mjs tests/buddy-system.test.mjs tests/trae-cache.test.mjs tests/trae-context.test.mjs tests/trae-offpeak.test.mjs tests/discount-unified.test.mjs tests/discount-unified-live.test.mjs tests/trae-offpeak-live.test.mjs tests/context-report.test.mjs tests/codearts-directory-auth.test.mjs tests/codearts-credits.test.mjs tests/raccoon-image-bridge.test.mjs tests/loomy-raccoon-credits.test.mjs tests/gemini-signature.test.mjs tests/gemini-sigstore.test.mjs",
+    "test:host": "node scripts/verify-host.mjs",
+    "pack:local": "node scripts/pack.mjs",
+    format: 'prettier --write "src/**/*.ts" "src/drivers/*.js" "tests/*" "scripts/*.mjs"',
+    "test:package": "node scripts/verify-package.mjs"
+  },
+  dsh: {
+    bundle: {
+      patch: "./cordis.patch.yml"
+    },
+    client: {
+      platform: "web",
+      inject: [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  peerDependencies: {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-credentials": "^0.2.0-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.2.0-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  peerDependenciesMeta: {
+    "@deepseek-ai/cordis": {
+      optional: true
+    },
+    "@deepseek-ai/dsh-credentials": {
+      optional: true
+    },
+    "@deepseek-ai/dsh-llm": {
+      optional: true
+    },
+    "@deepseek-ai/schemastery": {
+      optional: true
+    }
+  },
+  dependencies: {
+    jose: "6.1.3",
+    undici: "8.11.2",
+    yaml: "2.8.1"
+  },
+  devDependencies: {
+    "@types/node": "24.10.1",
+    esbuild: "0.25.12",
+    prettier: "3.6.2",
+    typescript: "5.9.3"
+  }
+};
+
+// src/drivers/user-agent.ts
+var CHANNEL_USER_AGENT = `dsh-channel-hub/${package_default.version} (+https://github.com/Seraphoenixy/dsh-channel-hub)`;
+function withChannelUserAgent(base) {
+  return (input, init) => {
+    const headers = new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : void 0)
+    );
+    const ua = headers.get("user-agent");
+    if (ua?.trim() && !/\bdeepseek-harness\//i.test(ua)) {
+      return base(input, init);
+    }
+    headers.set("User-Agent", CHANNEL_USER_AGENT);
+    return base(input, { ...init, headers });
+  };
+}
+var channelFetch = withChannelUserAgent(
+  (input, init) => globalThis.fetch(input, init)
+);
 
 // src/core/rate.ts
 var DEFAULT_PROMO_TIMEZONE = "Asia/Shanghai";
@@ -4364,14 +4472,34 @@ function extractJsonArray(text3, path) {
     return void 0;
   }
 }
+function isCodeArtsTransientFailure(body) {
+  if (body.includes("TM.00000001") || body.includes("TM.00000002") || body.includes("TM.00000003")) {
+    return true;
+  }
+  return /network\s+busy|网络繁忙/i.test(body);
+}
 function isCodeArtsAuthFailure(status, body) {
-  if (status === 401 || status === 403) return true;
+  if (isCodeArtsTransientFailure(body)) return false;
+  if (status === 401) return true;
+  if (status === 403) {
+    const text3 = body.trim();
+    if (text3.length === 0) return true;
+    return /APIG\.0602|APIG\.0301|TM\.00001010|invalid\s+token|token\s+expired|token\s+is\s+invalid|verify\s+ak\s+sk\s+signature/i.test(
+      text3
+    );
+  }
   return body.includes("APIG.0602") || /invalid\s+token|token\s+expired|token\s+is\s+invalid/i.test(body);
 }
 var CodeArtsCatalogAuthError = class extends Error {
   constructor(message) {
     super(message);
     this.name = "CodeArtsCatalogAuthError";
+  }
+};
+var CodeArtsCatalogRejectedError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "CodeArtsCatalogRejectedError";
   }
 };
 async function fetchSignedGet(fetcher, url, ak, sk, st, extraUnsignedHeaders) {
@@ -4396,11 +4524,19 @@ async function fetchSignedGet(fetcher, url, ak, sk, st, extraUnsignedHeaders) {
           `HTTP ${response.status}${body.length > 0 ? ` ${body.slice(0, 200)}` : ""}`
         );
       }
+      if (isCodeArtsTransientFailure(body)) return void 0;
+      if (response.status === 403) {
+        throw new CodeArtsCatalogRejectedError(
+          `HTTP 403${body.length > 0 ? ` ${body.slice(0, 200)}` : ""}`
+        );
+      }
       return void 0;
     }
     return await response.text();
   } catch (error) {
-    if (error instanceof CodeArtsCatalogAuthError) throw error;
+    if (error instanceof CodeArtsCatalogAuthError || error instanceof CodeArtsCatalogRejectedError) {
+      throw error;
+    }
     return void 0;
   }
 }
@@ -5609,6 +5745,11 @@ function buildDsmlSystemPrompt(tools) {
 var QUEUE_STATUS_BASE = "https://snap-access.cn-north-4.myhuaweicloud.com/api/v1/queue/status";
 var QUEUE_RETRY_DELAY_MS = 1e4;
 var QUEUE_MAX_ATTEMPTS2 = 180;
+function codeartsBusyRetryDelays() {
+  const raw = process.env.CODEARTS_BUSY_RETRY_DELAYS_MS;
+  if (raw === void 0) return [1e3, 3e3];
+  return raw.split(",").map((part) => Number(part.trim())).filter((ms) => Number.isFinite(ms) && ms >= 0).slice(0, 5);
+}
 function resolveFirstTokenTimeoutMs() {
   return Number.parseInt(process.env.DSH_CODEARTS_SSE_FIRST_TOKEN_TIMEOUT_MS ?? "", 10) || 3e5;
 }
@@ -5681,10 +5822,12 @@ function errorDetail(body) {
   return body;
 }
 function httpErrorCode(status, body) {
-  if (status === 401 || status === 403) return "AUTH";
+  if (isCodeArtsTransientFailure(body)) return "SERVER";
+  if (isCodeArtsAuthFailure(status, body)) return "AUTH";
   const detail = errorDetail(body);
   if (isQuotaExceededError(detail)) return QUOTA_EXCEEDED_CODE;
   if (status === 429) return "RATE_LIMIT";
+  if (status === 403) return "PERMISSION_DENIED";
   if (status === 400) {
     if (isContextWindowExceededError(detail)) return CONTEXT_WINDOW_EXCEEDED_CODE;
     return "INVALID_REQUEST";
@@ -6069,6 +6212,7 @@ var CodeArtsAdapter = class extends LlmAdapter {
     const url = `${CHAT_API_BASE}/chat/completions`;
     let response;
     let queueAttempts = 0;
+    let busyRetries = 0;
     let authRefreshed = false;
     let benefitHeaderDropped = false;
     const rateLimitTried = /* @__PURE__ */ new Set();
@@ -6199,11 +6343,31 @@ var CodeArtsAdapter = class extends LlmAdapter {
             );
           }
         }
+        if (isCodeArtsTransientFailure(errorText)) {
+          const delays = codeartsBusyRetryDelays();
+          if (busyRetries < delays.length) {
+            const wait = delays[busyRetries];
+            busyRetries += 1;
+            await delay(wait, options.signal);
+            continue;
+          }
+          const detail = errorDetail(errorText).slice(0, 300);
+          throw new LlmError2(
+            `codearts: model request failed with HTTP ${response.status}${detail.length > 0 ? `\uFF1A${detail}` : ""}`,
+            "SERVER",
+            { status: response.status }
+          );
+        }
         if (!isQueueError(response.status, errorText)) {
           const probe = await this.queryQueueStatus(credential, options.model, options.signal);
           if (probe === void 0 || probe.status === "working") {
             const code = httpErrorCode(response.status, errorText);
-            throw new LlmError2(`codearts: model request failed with HTTP ${response.status}`, code, { status: response.status });
+            const detail = errorDetail(errorText).slice(0, 300);
+            throw new LlmError2(
+              `codearts: model request failed with HTTP ${response.status}${detail.length > 0 ? `\uFF1A${detail}` : ""}`,
+              code,
+              { status: response.status }
+            );
           }
         }
       }
@@ -11028,6 +11192,12 @@ var QoderEncryptedInfer = class _QoderEncryptedInfer {
     });
     return new _QoderEncryptedInfer(g, context, options.metadata, options.host);
   }
+  dispose() {
+    const context = this.context;
+    if (context === 0) return;
+    this.context = 0;
+    this.g.exports.__wbg_qodercontext_free(context, 0);
+  }
   /**
    * 构造加密推理请求（url / headers / body）。
    *
@@ -11036,6 +11206,7 @@ var QoderEncryptedInfer = class _QoderEncryptedInfer {
    * 覆盖会导致 `403 Signature invalid`。
    */
   prepareInfer(ask) {
+    if (this.context === 0) throw new Error("Qoder WASM context has been disposed");
     const g = this.g;
     const payload = buildQoderInferPayload(ask);
     const result = g.callPointer((stack) => {
@@ -11060,31 +11231,36 @@ var QoderEncryptedInfer = class _QoderEncryptedInfer {
         sourceLen
       );
     });
-    const headerMap = g.takeObject(g.exports.requestresult_headers(result));
-    const headers = {};
-    if (headerMap instanceof Map) {
-      for (const [k, v] of headerMap) headers[String(k)] = String(v);
-    }
     const readResultString = (invoke) => {
-      let out = "";
-      const v = g.view();
+      let ptr = 0;
+      let len = 0;
       const stack = g.exports.__wbindgen_add_to_stack_pointer(-16);
       try {
         invoke(stack, result);
-        const ptr = v.getInt32(stack + 0, true);
-        const len = v.getInt32(stack + 4, true);
-        out = ptr ? g.readString(ptr, len) : "";
+        const v = g.view();
+        ptr = v.getInt32(stack, true);
+        len = v.getInt32(stack + 4, true);
+        return ptr ? g.readString(ptr, len) : "";
       } finally {
         g.exports.__wbindgen_add_to_stack_pointer(16);
+        if (ptr) g.exports.__wbindgen_export4(ptr, len, 1);
       }
-      return out;
     };
-    return {
-      // ⚠️ 参数顺序：(栈指针, ptr) —— 与直觉相反
-      url: readResultString((stack, ptr) => g.exports.requestresult_url(stack, ptr)),
-      headers,
-      body: readResultString((stack, ptr) => g.exports.requestresult_body(stack, ptr))
-    };
+    try {
+      const headerMap = g.takeObject(g.exports.requestresult_headers(result));
+      const headers = {};
+      if (headerMap instanceof Map) {
+        for (const [k, v] of headerMap) headers[String(k)] = String(v);
+      }
+      return {
+        // 参数顺序：(栈指针, ptr)。
+        url: readResultString((stack, ptr) => g.exports.requestresult_url(stack, ptr)),
+        headers,
+        body: readResultString((stack, ptr) => g.exports.requestresult_body(stack, ptr))
+      };
+    } finally {
+      g.exports.__wbg_requestresult_free(result, 0);
+    }
   }
 };
 
@@ -12010,33 +12186,37 @@ var QoderAdapter = class extends LlmAdapter3 {
         metadata: { ...this.product.clientMetadata },
         host: this.product.encryptedInferBase
       });
-      return client.prepareInfer({
-        modelKey: options.model,
-        userText,
-        ...systemText !== void 0 ? { systemText } : {},
-        isReasoning: fallback?.supportsThinking ?? false,
-        history,
-        // 工具定义：这是模型**唯一**能学到函数 schema 的通道，
-        // 缺了它模型只能用正文 XML 臆造调用（真实缺陷）。
-        tools,
-        ...options.maxTokens !== void 0 ? { maxTokens: options.maxTokens } : {},
-        ...options.reasoningEffort !== void 0 ? { reasoningEffort: options.reasoningEffort } : {},
-        ...fallback?.supportsImage !== void 0 ? { isVl: fallback.supportsImage } : {},
-        // 官方 `model_config` 的 display_name / max_input_tokens 必须带上。
-        ...fallback?.name !== void 0 ? { displayName: fallback.name } : {},
-        ...fallback?.contextWindow !== void 0 ? { maxInputTokens: fallback.contextWindow } : {},
-        // ⚠️ **`business` 必填**，否则服务端把请求路由到错误的后端节点。
-        //
-        // 实测（2026-09-20）：不带 `business` 时 `qfmodel`（Qwen3.8-Flash）
-        // 恒落到故障节点 `oa_qwen-plus-2025-04-28` 并返回
-        // `[FAIL]node:... msg:Execution failed`；补上 `business` 后立即正常
-        // （其余模型如 `qmodel_38max` 恰好不受影响，故早期排查易误判为
-        // 「该模型服务端故障」）。`agent` / `sec_scan` 等取值都能通。
-        //
-        // 源码依据：`MPi(A) { return A === 'sec_scan' ? 'security' : 'default' }`
-        // —— 服务端按 `business.type` 选路由池，缺字段会走异常分支。
-        business: { type: "agent" }
-      });
+      try {
+        return client.prepareInfer({
+          modelKey: options.model,
+          userText,
+          ...systemText !== void 0 ? { systemText } : {},
+          isReasoning: fallback?.supportsThinking ?? false,
+          history,
+          // 工具定义：这是模型**唯一**能学到函数 schema 的通道，
+          // 缺了它模型只能用正文 XML 臆造调用（真实缺陷）。
+          tools,
+          ...options.maxTokens !== void 0 ? { maxTokens: options.maxTokens } : {},
+          ...options.reasoningEffort !== void 0 ? { reasoningEffort: options.reasoningEffort } : {},
+          ...fallback?.supportsImage !== void 0 ? { isVl: fallback.supportsImage } : {},
+          // 官方 `model_config` 的 display_name / max_input_tokens 必须带上。
+          ...fallback?.name !== void 0 ? { displayName: fallback.name } : {},
+          ...fallback?.contextWindow !== void 0 ? { maxInputTokens: fallback.contextWindow } : {},
+          // ⚠️ **`business` 必填**，否则服务端把请求路由到错误的后端节点。
+          //
+          // 实测（2026-09-20）：不带 `business` 时 `qfmodel`（Qwen3.8-Flash）
+          // 恒落到故障节点 `oa_qwen-plus-2025-04-28` 并返回
+          // `[FAIL]node:... msg:Execution failed`；补上 `business` 后立即正常
+          // （其余模型如 `qmodel_38max` 恰好不受影响，故早期排查易误判为
+          // 「该模型服务端故障」）。`agent` / `sec_scan` 等取值都能通。
+          //
+          // 源码依据：`MPi(A) { return A === 'sec_scan' ? 'security' : 'default' }`
+          // —— 服务端按 `business.type` 选路由池，缺字段会走异常分支。
+          business: { type: "agent" }
+        });
+      } finally {
+        client.dispose();
+      }
     };
     const queueDeadline = Date.now() + resolveQueueTimeoutMs();
     let queueAttempts = 0;
@@ -13070,6 +13250,9 @@ function parseTraeSSELine(eventName, dataLine) {
     case "token_usage":
       ev.usage = raw;
       break;
+    case "metadata":
+      if ("prompt_cache_pool_record" in raw) ev.cachePoolRecord = raw.prompt_cache_pool_record;
+      break;
     case "done":
       if (typeof raw.finish_reason === "string") ev.finishReason = raw.finish_reason;
       break;
@@ -14094,6 +14277,38 @@ function reasoningRankOf(effort) {
 }
 
 // vendor/ofm/src/trae-adapter.ts
+var TRAE_CACHE_READ_FIELDS = [
+  "cache_read_input_tokens",
+  "cacheReadInputTokens",
+  "prompt_cache_hit_tokens",
+  "cached_tokens",
+  "prompt_tokens_details.cached_tokens",
+  "input_tokens_details.cached_tokens"
+];
+var TRAE_CACHE_WRITE_FIELDS = [
+  "cache_creation_input_tokens",
+  "cacheCreationInputTokens",
+  "cache_write_tokens",
+  "prompt_tokens_details.cache_write_tokens"
+];
+function readPath(source, path) {
+  let value = source;
+  for (const key of path.split(".")) {
+    if (typeof value !== "object" || value === null) return void 0;
+    value = value[key];
+  }
+  return value;
+}
+function traeCacheCount(usage, fields) {
+  let best;
+  for (const field of fields) {
+    const raw = readPath(usage, field);
+    if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) continue;
+    const value = Math.trunc(raw);
+    if (best === void 0 || value > best) best = value;
+  }
+  return best;
+}
 var TRAE_EFFORT_NAMES = {
   light: "Light",
   minimal: "Minimal",
@@ -14845,6 +15060,7 @@ var TraeAdapter = class extends LlmAdapter4 {
     let buffer = "";
     let streamEnded = false;
     let finishReason;
+    let cachePoolAssigned;
     let currentEvent = "";
     let currentData = "";
     let gotAnyContent = false;
@@ -14975,23 +15191,23 @@ var TraeAdapter = class extends LlmAdapter4 {
                   }
                   break;
                 }
+                case "metadata": {
+                  if (ev.cachePoolRecord !== void 0) cachePoolAssigned = ev.cachePoolRecord !== null;
+                  break;
+                }
                 case "token_usage": {
                   if (ev.usage !== void 0) {
                     const promptTokens = typeof ev.usage.prompt_tokens === "number" ? ev.usage.prompt_tokens : 0;
                     const completionTokens = typeof ev.usage.completion_tokens === "number" ? ev.usage.completion_tokens : 0;
                     const reasoningTokens = typeof ev.usage.reasoning_tokens === "number" ? ev.usage.reasoning_tokens : void 0;
                     const counter = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : void 0;
-                    const cacheReadTokens = counter(ev.usage.cache_read_input_tokens);
-                    const cacheWriteTokens = counter(ev.usage.cache_creation_input_tokens);
+                    const accept = (value) => value === void 0 ? void 0 : value > 0 || cachePoolAssigned === true ? value : void 0;
+                    const cacheReadTokens = accept(traeCacheCount(ev.usage, TRAE_CACHE_READ_FIELDS));
+                    const cacheWriteTokens = accept(traeCacheCount(ev.usage, TRAE_CACHE_WRITE_FIELDS));
                     const totalTokens = counter(ev.usage.total_tokens);
                     yield {
                       type: "usage",
                       usage: {
-                        // Local adaptation, live CN glm-5.3-flash 2026-10-21:
-                        // prompt_tokens includes cache (2727 input, 2688 read).
-                        // DSH counts ordinary input separately from cache.
-                        // *_total fields are zero placeholders in this response;
-                        // use the actual per-request counters and preserve zero.
                         inputTokens: Math.max(0, promptTokens - (cacheReadTokens ?? 0) - (cacheWriteTokens ?? 0)),
                         outputTokens: completionTokens,
                         ...cacheReadTokens !== void 0 ? { cacheReadTokens } : {},
@@ -22491,7 +22707,7 @@ async function createDrivers(ctx, { catalog, observer, store }) {
   const directoryFetch = async (input, init) => {
     const state = directoryContext.getStore();
     try {
-      const response = await fetch(input, init);
+      const response = await channelFetch(input, init);
       if (state) {
         if (!response.ok) {
           let detail = "";
@@ -22626,7 +22842,7 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         // 缩放投影（见 createDrivers 顶部的 imageRequestBridge 注释）：
         // 没有它，每张图都按原始字节内联，raccoon/qoder 的请求体上限必被顶穿。
         readImageRequest: imageRequestBridge,
-        fetchImpl: observer.fetcher(fetch),
+        fetchImpl: observer.fetcher(channelFetch),
         fetchRemoteModels: async () => product.fallbackModels,
         catalogModels: () => product.fallbackModels,
         nextAccount: async (model, tried) => {
@@ -22680,6 +22896,7 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         let models;
         if (id === "qoder" || id === "qodercn") {
           await syncQoderAccountName({
+            fetcher: channelFetch,
             account,
             credential: c,
             product,
@@ -22688,7 +22905,7 @@ async function createDrivers(ctx, { catalog, observer, store }) {
             updateAccount: (accountId, patch) => pool.updateAccount(accountId, patch)
           }).catch((error) => ctx.logger.warn("Qoder \u8D26\u53F7\u540D\u79F0\u66F4\u65B0\u5931\u8D25\uFF1A" + redact(error)));
           const url = product.encryptedInferBase + "/algo/api/v2/model/list?Encode=1";
-          const response = await fetch(url, {
+          const response = await channelFetch(url, {
             headers: buildCosyHeaders(null, url, {
               userID: c.uid,
               authToken: c.security_oauth_token ?? c.access_token,
@@ -22711,7 +22928,7 @@ async function createDrivers(ctx, { catalog, observer, store }) {
           if (!models) throw Error("\u65E0\u6CD5\u8BC6\u522B Qoder \u76EE\u5F55");
         } else if (id === "codearts") models = await auth.refreshModels(p);
         else if (id === "loomy") {
-          const res = await fetch(LOOMY.apiBase + "/models", {
+          const res = await channelFetch(LOOMY.apiBase + "/models", {
             headers: { Accept: "application/json", token: c.access_token },
             signal: AbortSignal.timeout(3e4)
           });
@@ -22727,6 +22944,7 @@ async function createDrivers(ctx, { catalog, observer, store }) {
           models = parseLoomyRemoteModels(await res.json());
         } else if (id === "gemini")
           models = await discoverGemini({
+            fetcher: channelFetch,
             credential: c,
             headers: geminiHeaders(c, { includeAccept: true }),
             endpoints: GEMINI_ENDPOINTS,
@@ -22854,20 +23072,20 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         const c = await read(a);
         if (!c) throw Error("\u51ED\u636E\u4E0D\u53EF\u8BFB\u53D6");
         if (id === "codearts") {
-          const result = await fetchCodeArtsAccountInfoDetailed(c);
+          const result = await fetchCodeArtsAccountInfoDetailed(c, channelFetch);
           if (!result.ok) return { balance: null, error: result.message };
           return result.info;
         }
         if (id === "buddy" || id === "workbuddy")
-          return fetchCreditBalanceDetailed(c, product);
+          return fetchCreditBalanceDetailed(c, product, channelFetch);
         if (id.startsWith("qoder"))
-          return fetchQoderCreditBalanceDetailed(c, product);
+          return fetchQoderCreditBalanceDetailed(c, product, channelFetch);
         if (id.startsWith("trae"))
-          return fetchTraeCreditBalanceDetailed(c, product);
-        if (id === "loomy") return fetchLoomyCreditBalanceDetailed(c, product);
+          return fetchTraeCreditBalanceDetailed(c, product, channelFetch);
+        if (id === "loomy") return fetchLoomyCreditBalanceDetailed(c, product, channelFetch);
         if (id === "raccoon")
-          return fetchRaccoonCreditBalanceDetailed(product, c);
-        if (id === "gemini") return fetchGeminiCreditBalance(c, product);
+          return fetchRaccoonCreditBalanceDetailed(product, c, channelFetch);
+        if (id === "gemini") return fetchGeminiCreditBalance(c, product, { fetcher: channelFetch });
         if (auth.fetchCreditBalance) return auth.fetchCreditBalance(c);
         if (auth.fetchBalanceFor) return auth.fetchBalanceFor(c);
         throw Error("\u8BE5\u6E20\u9053\u672A\u63D0\u4F9B\u989D\u5EA6\u67E5\u8BE2");
@@ -22883,15 +23101,15 @@ async function createDrivers(ctx, { catalog, observer, store }) {
       ].includes(id) ? async (a) => {
         const c = await read(a);
         if (!c) throw Error("\u51ED\u636E\u4E0D\u53EF\u8BFB\u53D6");
-        if (id === "codearts") return claimCodeArtsDailyCheckin(c);
-        if (id === "buddy") return claimDailyCheckin(c, product);
+        if (id === "codearts") return claimCodeArtsDailyCheckin(c, channelFetch);
+        if (id === "buddy") return claimDailyCheckin(c, product, channelFetch);
         if (id.startsWith("qoder"))
-          return claimQoderDailyCheckin(c, product);
+          return claimQoderDailyCheckin(c, product, channelFetch);
         if (id.startsWith("trae"))
           return claimTraeDailyCheckin(
             c,
             product,
-            fetch,
+            channelFetch,
             pool.traeCheckinDeviceGenerationFor(a.id),
             (g) => pool.updateTraeCheckinDeviceGeneration(a.id, g)
           );
@@ -22957,7 +23175,7 @@ async function createDrivers(ctx, { catalog, observer, store }) {
     let flow;
     let wechat = false;
     if (provider === "buddy" || provider === "workbuddy") {
-      const state2 = await fetchAuthState(fetch, void 0, product);
+      const state2 = await fetchAuthState(channelFetch, void 0, product);
       flow = {
         loginUrl: decorateLoginUrl(state2.authUrl, product),
         result: auth.login({ ...opts, state: state2.state }),

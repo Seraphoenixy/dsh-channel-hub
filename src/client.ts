@@ -705,6 +705,22 @@ window.__ModuleLoader__.load({
        * - 整块吞吐 = 输出 token /（请求开始 → 结束），含首字等待，总是可得。
        * 两者绝不合并成一个平均值。
        */
+      /**
+       * 缓存读数为「未知」时的原因（`undefined` = 没有可说的原因）。
+       *
+       * ⚠️ 只在**上游明确说**本次请求没挂缓存池（`Attempt.cachePool === null`）时
+       * 给出。Trae 自 2026-10-27 起恒报 0、且 `metadata` 里明说没分配池，只留一个
+       * 「—」会让下一个人把「上游没给」重新排查成「插件丢字段」—— 这正是本次
+       * 报障（`docs/ACCEPTANCE.md` 2026-11-02）花掉的成本。
+       */
+      const cacheUnknownNote = (attempt: any) =>
+        attempt?.cachePool === null
+          ? "上游未分配缓存池：Trae 自 2026-10-27 起不再上报缓存读/写（token_usage 恒为 0）。" +
+            "账单侧复测显示缓存折扣仍在生效（同一前缀第二次便宜约 3 倍），故这里按「未知」显示，而不是记成 0%。"
+          : undefined;
+      /** 把原因挂到格子上的 `title`（没有原因就原样返回内容）。 */
+      const withNote = (content: any, note: string | undefined) =>
+        note === undefined ? content : h("span", { title: note }, content);
       const reqTable = (items: any[]) =>
         table(
           [
@@ -758,11 +774,22 @@ window.__ModuleLoader__.load({
               // 那一列的数值在数据看板按渠道 / 模型汇总时更可读，日志表里
               // 每行都重复一遍既占宽又不便横向对比。token 总量仍在看板与
               // 概览小指标里。
-              (m?.cacheSamples ? fmt(m.cacheRead) : "—") +
-                " / " +
-                (m?.cacheWriteSamples ? fmt(m.cacheWrite) : "—"),
+              //
+              // ⚠️ 未知时挂上原因（见 `cacheUnknownNote`）：Trae 上游明说没分配
+              // 缓存池，只说一个「—」等于把排查成本留给下一个人。
+              withNote(
+                (m?.cacheSamples ? fmt(m.cacheRead) : "—") +
+                  " / " +
+                  (m?.cacheWriteSamples ? fmt(m.cacheWrite) : "—"),
+                m?.cacheSamples || m?.cacheWriteSamples
+                  ? undefined
+                  : cacheUnknownNote(a),
+              ),
               m?.reasoningSamples ? fmt(m.reasoning) : "—",
-              pct(m?.cacheHitRate),
+              withNote(
+                pct(m?.cacheHitRate),
+                m?.cacheHitRate === null ? cacheUnknownNote(a) : undefined,
+              ),
             ];
           }),
           // 只有「渠道 / 模型」(1) 与「账号」(3) 可能很长，允许折行；

@@ -210,14 +210,55 @@ function extractJsonArray(text: string, path: string[]): unknown[] | undefined {
 }
 
 /**
+ * 判断一次 CodeArts HTTP 失败是否是**上游瞬时容量问题**（「网络繁忙」一类）。
+ *
+ * 官方《SnapEngine Error Codes》：
+ * - `TM.00000001` Network busy. Try again later.
+ * - `TM.00000002` Persistent connection to backend service abnormal.
+ * - `TM.00000003` Failed to call backend service API.
+ *
+ * ⚠️ **必须放在鉴权判据之前**（2026-11-04 用户报障「华为码道渠道 API 密钥
+ * 无效」）：上游对聊天端点返回 **HTTP 403** + `TM.00000001 网络繁忙`，而
+ * 403 此前被无条件判成鉴权失败 → DSH 的 `AUTH` 分支把 message 整个替换成
+ * 固定文案「API 密钥无效」，把用户引向重新登录。实测当时凭据完全有效：
+ * 同一凭据同一时刻额度查询、目录刷新都成功，坏签名对照会得到
+ * `401 APIG.0301`（另一条判据）—— 真实原因只是上游忙，重试即恢复。
+ *
+ * 状态码不参与判定：同一语义在实测里出现过 403 / 400 / 200 + SSE 三种承载。
+ * 非 JSON 报文时按官方英文与实测中文文案兜底。
+ */
+export function isCodeArtsTransientFailure(body: string): boolean {
+  if (
+    body.includes('TM.00000001') ||
+    body.includes('TM.00000002') ||
+    body.includes('TM.00000003')
+  ) {
+    return true
+  }
+  return /network\s+busy|网络繁忙/i.test(body)
+}
+
+/**
  * 判断一次 CodeArts HTTP 失败是否属于「凭据失效，续期后可重试」的鉴权失败。
  *
  * CodeArts 经华为 APIG 网关鉴权：SecurityToken 过期/无效时网关返回
- * `APIG.0602`（"Invalid token"）。HTTP 状态**不固定**：聊天路径实测过
- * 401 / 403（见 `llm-adapter.ts` 的 401 兜底重试），目录路径实测过
- * **400**（2026-10-29 用户报障「目录 HTTP 400：code APIG.0602：Bad
- * request: the security token has expired」），故判据必须同时看状态码与
- * 响应体，缺一边都会漏。
+ * `APIG.0602`（"Invalid token"）；AK/SK 对不上时返回 `APIG.0301`
+ * （"verify ak sk signature fail"）或 `TM.00001010`。HTTP 状态**不固定**：
+ * 聊天路径实测过 401 / 403（见 `llm-adapter.ts` 的 401 兜底重试），目录
+ * 路径实测过 **400**（2026-10-29 用户报障「目录 HTTP 400：code
+ * APIG.0602：Bad request: the security token has expired」），故判据必须
+ * 同时看状态码与响应体，缺一边都会漏。
+ *
+ * ⚠️ **403 不再无条件等于鉴权失败**（2026-11-04 修正）：403 是网关的通用
+ * 承载码，同时覆盖「令牌过期（APIG.0602）」「验签失败（APIG.0301 /
+ * TM.00001010）」「权限不足（TM.00001005）」「账号禁用」「网络繁忙
+ * （TM.00000001）」—— 续期只对前两类有意义，对「忙」既救不了、还会白烧
+ * refresh_token（华为 STS 每次签发作废旧 refresh_token）。故：
+ * 1. 先排除 {@link isCodeArtsTransientFailure}（忙 / 后端异常）；
+ * 2. 401 仍按鉴权处理（实测的令牌失效承载码）；
+ * 3. 403 只在**空体**（无法归因，维持旧口径以免漏掉可自愈的过期令牌）或
+ *    响应体命中鉴权标记时才算鉴权失败；其余 403 交给调用方按权限/其它
+ *    语义分类，绝不能替换成「API 密钥无效」。
  *
  * ⚠️ 本函数是**聊天与目录两条路径共用的唯一判据**（2026-10-29 收敛）：
  * 此前 `llm-adapter.ts` 私有一份 `isAuthError`，目录路径完全没有 ——
@@ -226,7 +267,16 @@ function extractJsonArray(text: string, path: string[]): unknown[] | undefined {
  * 不要再复制判据（同 `isVisualModelId` 的教训）。
  */
 export function isCodeArtsAuthFailure(status: number, body: string): boolean {
-  if (status === 401 || status === 403) return true
+  if (isCodeArtsTransientFailure(body)) return false
+  if (status === 401) return true
+  if (status === 403) {
+    const text = body.trim()
+    // 空体：维持旧口径（无法归因时按鉴权处理，否则提前吊销的令牌会漏自愈）。
+    if (text.length === 0) return true
+    return /APIG\.0602|APIG\.0301|TM\.00001010|invalid\s+token|token\s+expired|token\s+is\s+invalid|verify\s+ak\s+sk\s+signature/i.test(
+      text,
+    )
+  }
   return body.includes('APIG.0602') || /invalid\s+token|token\s+expired|token\s+is\s+invalid/i.test(body)
 }
 
@@ -246,12 +296,31 @@ export class CodeArtsCatalogAuthError extends Error {
 }
 
 /**
+ * 目录端点**确定性拒绝**（非鉴权失败，如权限不足 / 账号禁用）。
+ *
+ * 与 {@link CodeArtsCatalogAuthError} 分开：续期只对鉴权失败有意义，这类
+ * 失败续期是无效动作；但它也不能被 `fetchSignedGet` 的 catch 当成网络抖动
+ * 吞成空列表 —— 一条空快照会把模型菜单清空且不报错。
+ */
+class CodeArtsCatalogRejectedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CodeArtsCatalogRejectedError'
+  }
+}
+
+/**
  * 签名 GET 请求远端端点并读取文本；网络失败或非 200 时返回 undefined
  * （不阻断调用方）。
  *
- * **例外**：非 200 且命中 {@link isCodeArtsAuthFailure}（APIG.0602 / 401 /
- * 403）时抛 {@link CodeArtsCatalogAuthError} —— 鉴权失败是可自愈的
- * （续期后重试即可），必须让调用方看见而不是吞成空目录。
+ * **例外**：非 200 且命中 {@link isCodeArtsAuthFailure}（APIG.0602 /
+ * APIG.0301 / TM.00001010 / 401 / 空体 403）时抛
+ * {@link CodeArtsCatalogAuthError} —— 鉴权失败是可自愈的（续期后重试
+ * 即可），必须让调用方看见而不是吞成空目录。{@link isCodeArtsTransientFailure}
+ * 命中的「网络繁忙」类失败不在此列：它不是凭据问题，按既有容错返回
+ * undefined（保留旧目录，不误触发续期）。**非鉴权的 403**（权限不足 /
+ * 账号禁用）抛 {@link CodeArtsCatalogRejectedError}：续期无效，但同样
+ * 不能变成空目录。
  */
 async function fetchSignedGet(
   fetcher: typeof fetch,
@@ -277,22 +346,39 @@ async function fetchSignedGet(
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     })
     if (!response.ok) {
-      // ⚠️ 鉴权失败（APIG.0602 / 401 / 403）**不能**与普通失败一起吞掉：
-      // 那正是「SecurityToken 过期 → 目录空列表」哑故障的成因（2026-10-29）。
-      // 读出响应体判类后显式抛出，让调用方走续期自愈；其余失败仍返回
-      // undefined（目录刷新不因单端点抖动而中断，维持既有容错语义）。
+      // ⚠️ 鉴权失败（APIG.0602 / APIG.0301 / TM.00001010 / 401 / 空体 403）
+      // **不能**与普通失败一起吞掉：那正是「SecurityToken 过期 → 目录空列表」
+      // 哑故障的成因（2026-10-29）。读出响应体判类后显式抛出，让调用方走
+      // 续期自愈；其余失败仍返回 undefined（目录刷新不因单端点抖动而中断，
+      // 维持既有容错语义）。
       const body = await response.text().catch(() => '')
       if (isCodeArtsAuthFailure(response.status, body)) {
         throw new CodeArtsCatalogAuthError(
           `HTTP ${response.status}${body.length > 0 ? ` ${body.slice(0, 200)}` : ''}`,
         )
       }
+      // 上游「网络繁忙」（TM.00000001 等）是瞬时容量问题：容忍，保留旧目录，
+      // 不触发续期（续期救不了，还会白烧 refresh_token）。
+      if (isCodeArtsTransientFailure(body)) return undefined
+      // 其余 403（权限不足 / 账号禁用）是**确定性拒绝**：同样不能吞成空目录，
+      // 否则一条空快照会把模型菜单清空且不报错（与上面的哑故障同一教训）。
+      // 由 `refreshModels` 原样上抛，快照 `error` 因此可见。
+      if (response.status === 403) {
+        throw new CodeArtsCatalogRejectedError(
+          `HTTP 403${body.length > 0 ? ` ${body.slice(0, 200)}` : ''}`,
+        )
+      }
       return undefined
     }
     return await response.text()
   } catch (error) {
-    // 只兜网络/超时类失败；上面显式抛出的鉴权错误必须原样上抛。
-    if (error instanceof CodeArtsCatalogAuthError) throw error
+    // 只兜网络/超时类失败；上面显式抛出的两类错误必须原样上抛。
+    if (
+      error instanceof CodeArtsCatalogAuthError ||
+      error instanceof CodeArtsCatalogRejectedError
+    ) {
+      throw error
+    }
     return undefined
   }
 }
@@ -315,9 +401,11 @@ async function fetchSignedGet(
  * {@link isCodeArtsBenefitModel}。
  *
  * 失败或空凭据时返回空数组（不阻断）；**例外**是鉴权失败
- * （{@link isCodeArtsAuthFailure}：APIG.0602 / 401 / 403）—— 抛
- * {@link CodeArtsCatalogAuthError}，由调用方（`service.ts` 的
- * `refreshModels`）静默续期后重试，不再让可自愈的过期令牌变成空目录。
+ * （{@link isCodeArtsAuthFailure}：APIG.0602 / APIG.0301 / TM.00001010 /
+ * 401 / 空体 403）—— 抛 {@link CodeArtsCatalogAuthError}，由调用方
+ * （`service.ts` 的 `refreshModels`）静默续期后重试，不再让可自愈的过期
+ * 令牌变成空目录。上游「网络繁忙」（{@link isCodeArtsTransientFailure}）
+ * 不属于鉴权失败：不续期、不抛，按普通失败容忍。
  */
 export async function fetchCodeArtsRemoteModels(
   credential: CodeArtsCredential,

@@ -847,6 +847,27 @@ test("the log table carries no input/output column any more", () => {
     assert.ok(header[0].includes(label), "missing expected column: " + label);
 });
 
+test("an unknown cache reading carries the upstream's reason in the log table", () => {
+  // 2026-11-02 报障：Trae 自 2026-10-27 起恒报 0 且 `metadata` 明说本次没挂缓存池，
+  // 界面只显示「—」会让下一个人把「上游没给」重新排查成「插件丢字段」。
+  // 断言原因文案与挂载点都在产物里（源码注释不算，故查整段 helper）。
+  const helper = decoded.match(/const cacheUnknownNote[^\n]*/);
+  assert.ok(helper, "cacheUnknownNote must exist in the built client");
+  assert.ok(
+    helper[0].includes("上游未分配缓存池"),
+    "the unknown-cache note must name the upstream reason",
+  );
+  assert.ok(
+    helper[0].includes("cachePool === null"),
+    "the note must only fire on the upstream's explicit 'no cache pool' statement",
+  );
+  // 两个格子都要挂：缓存读/写 与 缓存命中率（定义处写作 `withNote = (`，不计入）。
+  assert.ok(
+    (decoded.match(/withNote\(/g) ?? []).length >= 2,
+    "withNote must be called by both cache cells",
+  );
+});
+
 test("the stylesheet lives in its own file and is inlined as a string", () => {
   // 结构性修复（2026-10-21）：样式曾是 `client.ts` 里 570 行的模板字面量，
   // 任何出现在 CSS 注释里的反引号都会提前终止字符串 —— 连续踩坑 6 次，

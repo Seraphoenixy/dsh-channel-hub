@@ -10,7 +10,7 @@ import { AccountPool, providerCatalogVisible } from './account-pool.js'
 import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { settingsNamespaceFor } from './settings-compat.js'
 import { nextUtc8DayStartMs } from './model-queue.js'
-import { isCodeArtsBenefitModel, isCodeArtsAuthFailure, isVisualModelId } from './models.js'
+import { isCodeArtsBenefitModel, isCodeArtsAuthFailure, isCodeArtsTransientFailure, isVisualModelId } from './models.js'
 import { normalizeHarnessMessages } from './message-shape.js'
 import { signRequestHuawei } from './sign.js'
 import { createBlankReasoningSuppressor, createReasoningLoopDetector, hasUsableToolName, isReasoningLoopGuardEnabled, isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, reasoningLoopFailure, resolveEmptyResponseReason, resolveToolPairing, stripCourseLeakFromHistoryContent, stripCourseLeakIfEnabled } from './sse.js'
@@ -314,6 +314,28 @@ const QUEUE_RETRY_DELAY_MS = 10_000
 const QUEUE_MAX_ATTEMPTS = 180
 
 /**
+ * 上游「网络繁忙」（TM.00000001 等）的短退避重试间隔（毫秒，按序消费，
+ * 用尽即抛）。
+ *
+ * 依据官方错误码表 `TM.00000001 = Network busy. Try again later.`：这是
+ * 瞬时容量问题，等一两秒重试通常就恢复（2026-11-04 实测：13:47 起持续
+ * 403，13:57 起同一凭据直接 200）。
+ *
+ * 环境变量 `CODEARTS_BUSY_RETRY_DELAYS_MS`（逗号分隔；空串关闭重试）可
+ * 覆盖，测试用 1ms 量级跑同步夹具，线上可按需调优 —— 与 SSE 超时同款
+ * 「每次 stream() 调用读取」口径。
+ */
+function codeartsBusyRetryDelays(): number[] {
+  const raw = process.env.CODEARTS_BUSY_RETRY_DELAYS_MS
+  if (raw === undefined) return [1_000, 3_000]
+  return raw
+    .split(',')
+    .map((part) => Number(part.trim()))
+    .filter((ms) => Number.isFinite(ms) && ms >= 0)
+    .slice(0, 5)
+}
+
+/**
  * SSE 流空闲超时。CodeArts 后端 / APIG 网关对 SSE 连接有 ~60 秒无数据即
  * 断开的策略：当模型生成超长推理或大工具调用参数时，两次 chunk 之间可能
  * 静默数十秒，连接被服务端掐断后 Node undici 的 reader.read() 抛
@@ -589,12 +611,24 @@ function errorDetail(body: string): string {
  * httpErrorCode 词汇一致：400 且命中上下文超限措辞时归为
  * CONTEXT_WINDOW_EXCEEDED（触发 dsh compaction 自动压缩上下文），
  * 而不是不可重试的 HTTP_400，避免长会话在接近窗口上限时直接中断。
+ *
+ * ⚠️ **先看上游 error_code，再看状态码**（2026-11-04 用户报障「华为码道
+ * 渠道 API 密钥无效」）：403 是网关的通用承载码，实际响应体可能是
+ * `TM.00000001 网络繁忙`（瞬时容量问题，官方文档明示 "Try again later"）。
+ * 旧实现把 401/403 一律归 `AUTH`，DSH 客户端据此把 message 整个替换成
+ * 固定文案「API 密钥无效」—— 于是上游忙被说成密钥失效，用户被引向
+ * 重新登录。现在：
+ * - 上游「忙 / 后端异常」→ `SERVER`（harness 的可重试码，且保留原文案）；
+ * - 真鉴权形态（APIG.0602 / APIG.0301 / TM.00001010 / 401 / 空体 403）→ `AUTH`；
+ * - 其余 403（权限不足 / 账号禁用）→ `PERMISSION_DENIED`，message 原样透传。
  */
 function httpErrorCode(status: number, body: string): string {
-  if (status === 401 || status === 403) return 'AUTH'
+  if (isCodeArtsTransientFailure(body)) return 'SERVER'
+  if (isCodeArtsAuthFailure(status, body)) return 'AUTH'
   const detail = errorDetail(body)
   if (isQuotaExceededError(detail)) return QUOTA_EXCEEDED_CODE
   if (status === 429) return 'RATE_LIMIT'
+  if (status === 403) return 'PERMISSION_DENIED'
   if (status === 400) {
     if (isContextWindowExceededError(detail)) return CONTEXT_WINDOW_EXCEEDED_CODE
     return 'INVALID_REQUEST'
@@ -1179,7 +1213,10 @@ export class CodeArtsAdapter extends LlmAdapter {
     // 上限 QUEUE_MAX_ATTEMPTS 次（180 × 10s = 30 分钟）。
     let response: Response
     let queueAttempts = 0
-    // 鉴权失败（APIG.0602 / 401 / 403）后已刷新过凭据：避免死循环，
+    // 「网络繁忙」类瞬时失败已重试的次数（单独计数：与排队重试不是一回事）。
+    let busyRetries = 0
+    // 鉴权失败（APIG.0602 / APIG.0301 / 401 / 空体 403；403 的「网络繁忙」
+    // 已由 isCodeArtsTransientFailure 排除）后已刷新过凭据：避免死循环，
     // 同一次 stream() 调用最多 refresh 一次。
     let authRefreshed = false
     // 该账号不带 benefit 包时去掉 `maas_type: benefit` 头重试一次：
@@ -1382,6 +1419,28 @@ export class CodeArtsAdapter extends LlmAdapter {
             )
           }
         }
+        // ── 上游瞬时「网络繁忙」（TM.00000001 等）：短退避重试，用尽按 SERVER 抛 ──
+        //
+        // ⚠️ 必须在**鉴权自愈之前**就被排除在鉴权判据之外（见
+        // `models.ts` 的 `isCodeArtsTransientFailure`）：2026-11-04 用户
+        // 报障「API 密钥无效」的真实报文就是 403 + TM.00000001，凭据当时
+        // 完全有效。这里也**不走排队流程**：它不是「等会话槽位」，探测
+        // 排队端点只会多打一次无效请求。
+        if (isCodeArtsTransientFailure(errorText)) {
+          const delays = codeartsBusyRetryDelays()
+          if (busyRetries < delays.length) {
+            const wait = delays[busyRetries]
+            busyRetries += 1
+            await delay(wait, options.signal)
+            continue
+          }
+          const detail = errorDetail(errorText).slice(0, 300)
+          throw new LlmError(
+            `codearts: model request failed with HTTP ${response.status}${detail.length > 0 ? `：${detail}` : ''}`,
+            'SERVER',
+            { status: response.status },
+          )
+        }
         if (!isQueueError(response.status, errorText)) {
           // 非 TM.00001041 错误也未必没排队：openpangu 等模型的并发限流
           // 错误码/HTTP 状态可能与 GLM 不同，但仍会进入后端队列。先探测
@@ -1393,7 +1452,15 @@ export class CodeArtsAdapter extends LlmAdapter {
             // 与 deepseek 适配器的 httpErrorCode 词汇保持一致；
             // 400 + 上下文超限措辞归为 CONTEXT_WINDOW_EXCEEDED（触发 compaction）。
             const code = httpErrorCode(response.status, errorText)
-            throw new LlmError(`codearts: model request failed with HTTP ${response.status}`, code, { status: response.status })
+            // ⚠️ 文案必须带上上游 `error_code` / `error_msg`：只留状态码时，
+            // 账本与 UI 只剩「HTTP 403」，根本分不清是密钥失效、额度耗尽
+            // 还是网络繁忙（2026-11-04 报障的归因成本就花在这里）。
+            const detail = errorDetail(errorText).slice(0, 300)
+            throw new LlmError(
+              `codearts: model request failed with HTTP ${response.status}${detail.length > 0 ? `：${detail}` : ''}`,
+              code,
+              { status: response.status },
+            )
           }
           // probe.status 为 'waiting' 或 'queue_full' → 落入下方排队流程。
         }

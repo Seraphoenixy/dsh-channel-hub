@@ -1,4 +1,5 @@
 import { authorizationLink } from "../host/browser.ts";
+import { channelFetch as fetch } from "./user-agent.ts";
 import { rateLabel } from "../core/rate.ts";
 import { extendedTierLabel } from "../core/context.ts";
 import { promotionsFromConfig } from "../core/promotion.ts";
@@ -415,6 +416,7 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
           let models;
           if (id === "qoder" || id === "qodercn") {
             await syncQoderAccountName({
+              fetcher: fetch,
               account, credential: c, product,
               getAccount: (accountId) => pool.findAccount(accountId),
               readCredential: read,
@@ -462,6 +464,7 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
             models = parseLoomyRemoteModels(await res.json());
           } else if (id === "gemini")
             models = await discoverGemini({
+              fetcher: fetch,
               credential: c,
               headers: geminiHeaders(c, { includeAccept: true }),
               endpoints: GEMINI_ENDPOINTS,
@@ -635,7 +638,7 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
         if (!c) throw Error("凭据不可读取");
         if (id === "codearts") {
           // codearts 早已备好带原因的版本，只是此前没人调用。
-          const result = await fetchCodeArtsAccountInfoDetailed(c);
+          const result = await fetchCodeArtsAccountInfoDetailed(c, fetch);
           if (!result.ok) return { balance: null, error: result.message };
           // 成功时**原样**返回 `CodeArtsAccountInfo`：它自己带 `isCreditPackage`，
           // 由 `core/credits.ts` 的 `fromCodeArts` 区分「积分账户」与「非积分账户」
@@ -643,15 +646,15 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
           return result.info;
         }
         if (id === "buddy" || id === "workbuddy")
-          return fetchCreditBalanceDetailed(c, product);
+          return fetchCreditBalanceDetailed(c, product, fetch);
         if (id.startsWith("qoder"))
-          return fetchQoderCreditBalanceDetailed(c, product);
+          return fetchQoderCreditBalanceDetailed(c, product, fetch);
         if (id.startsWith("trae"))
-          return fetchTraeCreditBalanceDetailed(c, product);
-        if (id === "loomy") return fetchLoomyCreditBalanceDetailed(c, product);
+          return fetchTraeCreditBalanceDetailed(c, product, fetch);
+        if (id === "loomy") return fetchLoomyCreditBalanceDetailed(c, product, fetch);
         if (id === "raccoon")
-          return fetchRaccoonCreditBalanceDetailed(product, c);
-        if (id === "gemini") return fetchGeminiCreditBalance(c, product);
+          return fetchRaccoonCreditBalanceDetailed(product, c, fetch);
+        if (id === "gemini") return fetchGeminiCreditBalance(c, product, { fetcher: fetch });
         if (auth.fetchCreditBalance) return auth.fetchCreditBalance(c);
         if (auth.fetchBalanceFor) return auth.fetchBalanceFor(c);
         throw Error("该渠道未提供额度查询");
@@ -668,10 +671,10 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
         ? async (a) => {
             const c = await read(a);
             if (!c) throw Error("凭据不可读取");
-            if (id === "codearts") return claimCodeArtsDailyCheckin(c);
-            if (id === "buddy") return claimDailyCheckin(c, product);
+            if (id === "codearts") return claimCodeArtsDailyCheckin(c, fetch);
+            if (id === "buddy") return claimDailyCheckin(c, product, fetch);
             if (id.startsWith("qoder"))
-              return claimQoderDailyCheckin(c, product);
+              return claimQoderDailyCheckin(c, product, fetch);
             if (id.startsWith("trae"))
               return claimTraeDailyCheckin(
                 c,

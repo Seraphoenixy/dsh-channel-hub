@@ -782,6 +782,8 @@
             )
           );
         };
+        const cacheUnknownNote = (attempt) => attempt?.cachePool === null ? "\u4E0A\u6E38\u672A\u5206\u914D\u7F13\u5B58\u6C60\uFF1ATrae \u81EA 2026-10-27 \u8D77\u4E0D\u518D\u4E0A\u62A5\u7F13\u5B58\u8BFB/\u5199\uFF08token_usage \u6052\u4E3A 0\uFF09\u3002\u8D26\u5355\u4FA7\u590D\u6D4B\u663E\u793A\u7F13\u5B58\u6298\u6263\u4ECD\u5728\u751F\u6548\uFF08\u540C\u4E00\u524D\u7F00\u7B2C\u4E8C\u6B21\u4FBF\u5B9C\u7EA6 3 \u500D\uFF09\uFF0C\u6545\u8FD9\u91CC\u6309\u300C\u672A\u77E5\u300D\u663E\u793A\uFF0C\u800C\u4E0D\u662F\u8BB0\u6210 0%\u3002" : void 0;
+        const withNote = (content, note) => note === void 0 ? content : h("span", { title: note }, content);
         const reqTable = (items) => table(
           [
             "\u65F6\u95F4",
@@ -822,9 +824,18 @@
               // 那一列的数值在数据看板按渠道 / 模型汇总时更可读，日志表里
               // 每行都重复一遍既占宽又不便横向对比。token 总量仍在看板与
               // 概览小指标里。
-              (m?.cacheSamples ? fmt(m.cacheRead) : "\u2014") + " / " + (m?.cacheWriteSamples ? fmt(m.cacheWrite) : "\u2014"),
+              //
+              // ⚠️ 未知时挂上原因（见 `cacheUnknownNote`）：Trae 上游明说没分配
+              // 缓存池，只说一个「—」等于把排查成本留给下一个人。
+              withNote(
+                (m?.cacheSamples ? fmt(m.cacheRead) : "\u2014") + " / " + (m?.cacheWriteSamples ? fmt(m.cacheWrite) : "\u2014"),
+                m?.cacheSamples || m?.cacheWriteSamples ? void 0 : cacheUnknownNote(a)
+              ),
               m?.reasoningSamples ? fmt(m.reasoning) : "\u2014",
-              pct(m?.cacheHitRate)
+              withNote(
+                pct(m?.cacheHitRate),
+                m?.cacheHitRate === null ? cacheUnknownNote(a) : void 0
+              )
             ];
           }),
           // 只有「渠道 / 模型」(1) 与「账号」(3) 可能很长，允许折行；

@@ -1,8 +1,24 @@
 # 验收记录
 
-日期：2026-10-21。版本：0.1.0-alpha.1。
+日期：2026-10-21（首版基线；2026-11-02 发布 0.1.0 时补入同日条目）。版本：0.1.0。
 
 ## 已完成
+
+- **Qoder 加密请求释放 WASM 内存（2026-11-06）**。国区账本记录三次 `unreachable`，均无推理 HTTP 尝试。离线用合成凭据、约 4 MiB 的图片数据及 96 MiB 的 WASM 内存上限复现，第 7 次请求构造失败。修复后相同探针连续构造 160 次成功，WASM 内存维持在 32 MiB。回归测试检查重复构造时的内存增长和请求输出。未使用真实账号做推理验收。
+
+- **Trae 缓存命中率恒为 0%：`token_usage` 的缓存计数自 2026-10-27 起不再上报，0 被当成了「未命中」的测量**（2026-11-02，用户报障「又出现了 trae 渠道的模型缓存命中率未正确统计的问题」）：
+
+  1. **先复现、再定性**（只读复制 `ledger.sqlite`，不改运行中的 profile）：账本里 Trae 的缓存读取在 **2026-10-27T07:30:55Z** 还是正常的（`input=697 / cacheRead=34560`，命中率 ~98%），下一次 Trae 请求（**2026-10-28T06:55:21Z**）起变成 `input=11980 / cacheRead=0`，此后 **595 次请求再没出现过非零**（按天 460 / 2 / 133；其中 570 条把 0 写进了账本、25 条压根没有缓存字段），且 `input` 单调增长（同一会话 11.9k → 69.3k）。同期 `cacheSamples/cacheCoverage` 仍记 1.0，即**每一条带 0 的帧都被记成「已测量、命中 0」** —— 看板与日志因此给出一个上游没测过的 0%。
+
+  2. **根因不在本插件的解析，而在上游不再上报这两个计数**。2026-11-02 用真实 Trae CN 账号直连适配器抓帧（`.cache/trae-usage-shape.mjs`，不打印凭据）：同一段 18955 token 的前缀连发三次，`token_usage` 均为 `prompt_tokens=18955`、`cache_read_input_tokens=0`、`cache_creation_input_tokens=0`，并多出旧帧里没有的 `cluster: "normal_context"`；帧内**没有任何**其他缓存字段（DeepSeek 式 `prompt_cache_hit_tokens`、OpenAI 式 `prompt_tokens_details.cached_tokens` 都不存在）。补发 IDE 自己请求体里的 `session_id` / `conversation_id`（字段名取自 `harness.dll` 的 `llm_utils_chat` 结构串）不改变结果（`.cache/trae-session-cache-probe.mjs`）。适配器与已安装 `dist` 的字段映射都在（`dist/index.js` 含 `cache_read_input_tokens`），显示链路也正常（同机其它渠道非零）——**字段确实没被丢**。
+
+  3. **但「0」不等于「没缓存」**（GitHub 调研 + 本机复测，2026-11-02）：`trae-adapter.ts` 的 `traeCacheCount` 注释里有完整表格，要点是 —— ① `.cache/trae-metadata-probe.mjs` 抓到同一次响应的 `metadata` 事件里 `prompt_cache_pool_record` **恒为 `null`**（上游自己说本次没挂缓存池），这是区分「没给」与「真的是 0」的官方判据；② 本机账单 A/B（`.cache/trae-billing-ab.mjs`，交错 A1→B1→A2→B2、两个全新前缀、每次读账前等 25 秒结算窗口、90905 token 前缀）冷 1.7488 / 1.7540、**热 0.5024 / 0.5472**，同前缀第二次便宜约 3 倍，而这几帧 `cache_read=0`、池记录 `null`；③ 第三方同题：`dingminhua/dsh-connect-trae#69`（146k 请求冷 5.84 / 热 0.12，比值 0.0205 ≈ 官方 cacheRead/cacheMiss 0.0200；增长式对话第 2 轮起降 30–50 倍）、`#67`（`prompt_cache_pool_record` 恒空；「整请求复用」≠ 前缀缓存）、`yetone/magpie#3991`、`Ebony-Vinyl/dsh-our-free-model#701` 与其合并的 PR #675（vendor 上游同样只在计数 > 0 时才带 `cacheReadTokens`）。**结论：缓存折扣仍在生效，上报缺口是真的；把 0 记成 0% 命中，等于替上游编造一个它没做的测量 —— 正是本次报障的「缓存命中率未正确统计」。**
+
+  4. **改动**：① `vendor/ofm/src/trae.ts`：`TraeSSEEvent` 增加 `cachePoolRecord`，`metadata` 分支用 `in` 判定键是否存在后取值（「没有这个键」与「显式 null」含义不同，不能用取值判空合并）。② `vendor/ofm/src/trae-adapter.ts`：新增 `traeCacheCount()`（Anthropic / DeepSeek / OpenAI 三套字段名，镜像值取最大、缺失与非法留 `undefined`）；`token_usage` 的缓存读/写**只在计数非零，或本次请求挂了缓存池（`cachePoolAssigned === true`）时才下发**。③ `src/core/observer.ts` + `src/core/types.ts`：把 `prompt_cache_pool_record` 记到 `Attempt.cachePool`（显式 `null` 与字段缺失分开存）。④ `src/client.ts`：日志表「缓存读 / 写」与「缓存命中率」两格在未知时挂 `title`，写明「上游未分配缓存池：Trae 自 2026-10-27 起不再上报缓存读/写……」——只留一个「—」会把排查成本留给下一个人。`inputTokens = prompt_tokens - 已知缓存` 与 `total_tokens` 语义不变：未知时按全量输入计，总 token 不会被算小（少算总 token 会让宿主自动压缩永不触发）。宿主侧聚合无需改动 —— `cacheSamples` 只在 `cacheRead !== undefined` 时累加，未知样本自然退出命中率分母，`cacheCoverage` 如实下降。
+
+  5. **测试**（`tests/trae-cache.test.mjs` 10 项，接入 `test:errors`）：live 形态真命中仍计数（2688，命中率 2688/2727）；**池记录非空时**同样一帧 0 判为真未命中（`cacheHitRate: 0`、覆盖率 1 —— 上游恢复分配池后 0% 自动回来）；池记录显式 `null` 时判未知（`cacheHitRate: null`、覆盖率 0、`input` 仍是全量、`totalTokens` 不变、`attempt.cachePool === null`）；有 `metadata` 但**没有该键**时判未知且不写 `cachePool`；`metadata` **晚于** `token_usage` 到达时保守判未知；非零计数即使在池记录为 `null` 时也采信；诊断帧（`progress_notice` / `queue_*` / `extra_info` / `timing_cost`）既不被当成错误、`extra_info.input_token` 也不被当成 prompt 的未命中量；DeepSeek / OpenAI 两套字段名可读且镜像值只算一次；负数与字符串维持未知；混合样本（1 真命中 + 2 未知）命中率只按报过数的那个算、覆盖率 1/3。`tests/client.test.mjs` 增 1 项锁住「未知时给出上游原因」的文案与挂载点（两个格子都挂）。夹具全合成、不联网、不读真实账号。
+
+  6. **未验证 / 未改动**：未回写历史账本（10-28 之后 595 条里那 570 条已落库的 0 保持原样 —— 改写历史要用「日期 + 启发式」判定，收益不及风险，README 已写明该日期）；Trae Global 无真实账号，未单独验证（本仓库只注册 CN 产品，同一适配器口径一并生效）；`metadata` 帧缺失或晚到时按未知（保守，不编数字）；**已排除** `extra_info` 的 `input_token`（实测 25/32/57，随 `content` 文本长度变化，不是 prompt 的未命中量）与 `timing_cost`（`queue_timing` 与 `first_sse_event_time` 语义未核实，暂不采用）。**未做但值得做（下一步，本轮调研发现）**：Trae 私有只读接口 `POST https://api.trae.cn/trae/api/v1/pay/query_user_usage_group_by_session` 的 `extra_info` 里有服务端真实的 `cache_read_token` / `input_token`（第三方 `cxzlw` 于 2026-11-01 在 `dingminhua/dsh-connect-trae#69` 贴出样例），若它接受 IDE 凭据，就能给渠道卡片补一个**上游口径**的真实命中读数；本插件本轮未接它（新端点 + 会话级聚合，需要单独验收）。宿主要重载插件（重启或 dev 热重载）才会载入新 `dist/`，且重载前的历史行仍是 0%。
 
 - **码道「总积分包」被重复求和，积分读数翻倍**（2026-10-30，用户报障「华为码道的积分统一有问题，总积分包好像就是合计值不应被再次做加法」）：
 
@@ -183,7 +199,7 @@
   7. **未做**：未在运行中的 DSH 窗口里用真实用户对话复测（需要人工在 GUI 里发一条真实请求）；未验证长会话下前缀缓存命中率是否与替换前一致（模板逐字稳定是必要条件，实测命中率需真实多轮观察）。
 - **Harness system 身份句（验收范围纠正）**：此前记录过将 `You are an AI agent powered by DeepSeek Harness.` 中的 `powered by` 改成 `running in` 后通过，但同日 Nornia 首轮故障的重新验证推翻了“身份句改写已足够使完整模板通过”的结论；不再以此前的完整模板验收作为当前可用性证据。身份句规则保留，当前正式对话以上一项整篇替换为准，且该项已由真实宿主端到端验证。
 - **Nornia 首轮 Buddy 国区拦截复验**：只读会话记录确认路由为 `channel-hub/buddy`、模型 `hy3`，用户第一条正式对话即失败；同会话的标题后台请求成功不计作正式对话成功。在用户分两次明确授权后，向 `copilot.tencent.com` 执行 3 次对照与 24 次定位/验收请求：中性 system 返回 200/OK；仅改写身份句的 5764 字符原系统模板无工具/带 34 个工具均 400（unapproved channel）。缩小到 Web GUI 说明前两句，221 字符原句对单独请求也 400；在两句间仅将一个空格改成两个换行、连同既有身份句改写，完整 5765 字符 system 加原 34 个工具、`max_tokens=512`、low 思考返回 200，正文 `OK`。定位请求上限 64 token，用户消息均为合成“回复 OK”，未重放聊天历史、未刷新或修改凭据、未写正在运行的 profile。此项是真实网络适配器验收，探针输出上限为 512；用户随后确认实际 DSH 界面已正常回复 OK，只读账本同时确认原 Nornia 失败会话于北京时间 19:29:36 的 Buddy hy3 请求 outcome=success。国际版新规则不启用。
-- **Trae 缓存用量**：真实 Trae CN IDE 账号、远端确认的 `glm-5.3-flash`，两次相同合成 system 的 `token_usage` 分别为 `prompt_tokens=2727 / cache_read=0` 与 `2727 / 2688`。修复把 `cache_read_input_tokens` / `cache_creation_input_tokens` 映射到 DSH 的缓存字段并从含缓存的 `prompt_tokens` 中扣除，保留 `total_tokens`；`*_total` 零占位不覆盖本次计数，显式零保留、缺失或非法值维持未知。真实复测两次均输出 `OK.`，宿主与账本记录 input=39 / cacheRead=2688 / cacheWrite=0，单请求命中率 98.6%。
+- **Trae 缓存用量**：真实 Trae CN IDE 账号、远端确认的 `glm-5.3-flash`，两次相同合成 system 的 `token_usage` 分别为 `prompt_tokens=2727 / cache_read=0` 与 `2727 / 2688`。修复把 `cache_read_input_tokens` / `cache_creation_input_tokens` 映射到 DSH 的缓存字段并从含缓存的 `prompt_tokens` 中扣除，保留 `total_tokens`；`*_total` 零占位不覆盖本次计数，显式零保留、缺失或非法值维持未知。真实复测两次均输出 `OK.`，宿主与账本记录 input=39 / cacheRead=2688 / cacheWrite=0，单请求命中率 98.6%。**（2026-11-02 更新：其中「显式零保留」这一条已被推翻 —— 上游自 2026-10-27 起把该字段恒填 0 且不再分配缓存池，0 不再是测量值；现行口径见本文件顶部那条。）**
 - **Qoder 国区/国际版用户名补齐**：原有两个账号凭据均缺 nickname、账号标签等于随机账号 id。修复在目录发现时补齐空白或等于账号 id 的生成标签：优先取凭据 nickname，否则走对应区域 `/api/v1/userinfo`（20 秒超时），`name` 为空时回退非空 `username`；保留自定义名称，不写凭据或设备字段。真实两个账号只读查询后 `upstreamNamePresent=true`、`displayIsGenerated=false`、`matchesUpstream=true`、`credentialRefUnchanged=true`。
 - **额度轮询与自动续期**：宿主 BalanceService 启动即检查、后台每 30 秒扫描、单账号 5 分钟内复用读数；失败保留上次成功值并按 30 秒指数退避至 30 分钟。真实观察：五个账号均出现构建之后的成功额度更新时间，无 error/retryAt。5 分钟周期与退避由模拟时钟测试验证，未等待完整真实周期，也未制造真实凭据过期。
 - **自动签到**：启动即检查、每五分钟扫描，按账号与 UTC+8 日期持久去重。真实观察：Buddy 国区与 Trae 为 done / 今日已签到，Qoder 国区与国际版为 waiting / 等待本轮活动刷新且 `coversToday=false`；WorkBuddy 国际版无签到入口。未来活动刷新后的领取未真实等待验证。
@@ -201,4 +217,6 @@
 - 实际 DSH 窗口中的视觉和交互验收，以及长时间运行压力测试。侧边栏面板入口的布局以无头渲染 + 宿主 CSS 数值核对通过，但**未在正在运行的 DSH 窗口里点开验证**（该 GUI 需鉴权，无法从命令行驱动）；首次启用仍需刷新页面一次以加载新的客户端 bundle。
 - 开发热重载的逐页视觉验收；辅助测试覆盖缓存清理、恢复、目录监视与 junction 目标解析。真实 DSH 中已观察到构建后自动重载并按真实账号刷新目录，但未做逐页视觉检查。首次启用仍需重启一次 DSH。
 
-已实现对应接线不代表上述真实验收通过。本版本保持 alpha 标识。
+已实现对应接线不代表上述真实验收通过。**0.1.0 只是版本号从 alpha 转正，不改变本节任何一条结论** —— 未验证项仍是未验证项，逐项见上。
+
+- 2026-11-04：所有渠道接入统一 UA 策略，保留 OFM 产品 UA，替换 DSH 默认值并补齐缺失 UA；版本来自 package.json。新增 tests/user-agent.test.ts 3 项离线测试，覆盖大小写归一、原头不变、Request 请求体和 init 覆盖语义。npm run check 全部通过（类型、单元、错误回归、构建、客户端、临时宿主、打包）；dist 经构建更新。未进行真实登录、续期或推理验收；未读取真实凭据、未修改运行中 profile。

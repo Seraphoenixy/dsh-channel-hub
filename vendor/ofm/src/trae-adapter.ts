@@ -58,6 +58,120 @@ import { reportLedgerAccount } from './token-ledger.js'
 export const PROVIDER = 'trae'
 
 /**
+ * `token_usage` 里「缓存读取」的候选字段名（含嵌套路径）。
+ *
+ * Trae 的 live 形态是 Anthropic 式（`cache_read_input_tokens`），但同一家网关
+ * 在不同通道 / 不同时期会用 DeepSeek 式（`prompt_cache_hit_tokens`）或 OpenAI 式
+ * （`prompt_tokens_details.cached_tokens`）。三套都认，才不会「上游换了字段名
+ * ⇒ 命中率又是一片 0」这种报障再来一次（2026-10-27 的那次变更见
+ * {@link traeCacheCount}）。
+ */
+const TRAE_CACHE_READ_FIELDS: readonly string[] = [
+  'cache_read_input_tokens',
+  'cacheReadInputTokens',
+  'prompt_cache_hit_tokens',
+  'cached_tokens',
+  'prompt_tokens_details.cached_tokens',
+  'input_tokens_details.cached_tokens',
+]
+
+/** 缓存写入的同款候选字段（Trae 目前恒为 0，留着是为了字段改名时不丢数）。 */
+const TRAE_CACHE_WRITE_FIELDS: readonly string[] = [
+  'cache_creation_input_tokens',
+  'cacheCreationInputTokens',
+  'cache_write_tokens',
+  'prompt_tokens_details.cache_write_tokens',
+]
+
+/** 按点号路径取值（`a.b.c`；中途类型不对就当作没有）。 */
+function readPath(source: Record<string, unknown>, path: string): unknown {
+  let value: unknown = source
+  for (const key of path.split('.')) {
+    if (typeof value !== 'object' || value === null) return undefined
+    value = (value as Record<string, unknown>)[key]
+  }
+  return value
+}
+
+/**
+ * 从 `token_usage` 取缓存计数：**原样返回上游给的值（含 0）**，取候选字段里的最大值
+ * （同一个数常被几套命名镜像，也可能被镜像成桩 0）；缺失 / 非法返回 `undefined`。
+ *
+ * ⚠️ **「0 算不算数」不在这里判断** —— 由调用点按 `metadata.prompt_cache_pool_record`
+ * 决定（见 `consumeSse` 的 `cachePoolAssigned`）。这个函数只负责取值。
+ *
+ * ## 背景：2026-10-27 之后这两个计数不再可信（用户报障「trae 缓存命中率又不对了」）
+ *
+ * 2026-10-27T23:07（UTC+8）之前，Trae CN 会如实回填 `cache_read_input_tokens`：
+ * 同一段前缀连发两次，第二次是 `prompt_tokens=2727 / cache_read=2688`
+ * （`tests/trae-cache.test.mjs` 的 live 形态即此，曾被当作「显式零 = 真未命中」
+ * 的依据）。之后上游口径变了，现场实测（`.cache/trae-usage-shape.mjs`、
+ * `.cache/trae-metadata-probe.mjs`，2026-11-02）：
+ *
+ * - 同一段 18955 token 的前缀连发 3 次，帧里 `cache_read_input_tokens` 恒为 0，
+ *   `cache_creation_input_tokens` 与全部 `*_total` 也是 0，且多出一个旧帧里没有的
+ *   `cluster: "normal_context"`；
+ * - 同一次响应的 `metadata` 事件里 `prompt_cache_pool_record` 恒为 `null`
+ *   （= 上游明说这次没挂缓存池），`timing_cost` 里 `provider_model_name` 正常；
+ * - 补发 `session_id` / `conversation_id`（IDE 自己的 `llm_utils_chat` 请求体
+ *   确实带这两个字段，见 `harness.dll` 的请求结构串）不改变结果。
+ *
+ * 第三方同题记录（都独立复现了同一个拐点）：
+ *
+ * | 来源 | 结论 |
+ * |---|---|
+ * | `dingminhua/dsh-connect-trae#67` | 字段与 `prompt_cache_pool_record` 恒空；建议 0% 只作可观测性提示 |
+ * | `dingminhua/dsh-connect-trae#69` | **账单侧证据推翻「没有缓存」**：同一 146k 请求冷 5.84 / 热 0.12 积分（比值 0.0205 ≈ 官方 cacheRead/cacheMiss 0.0200），增长式对话第 2 轮起降 30–50 倍；结论是「缓存仍在生效，只是不再上报」 |
+ * | `yetone/magpie#3991` | 同类形态；把「没给」按未知显示，而不是 0% |
+ * | `Ebony-Vinyl/dsh-our-free-model#701` / PR #675 | 本仓库 vendor 的上游：合并的实现同样**只在计数 > 0 时才带 `cacheReadTokens`** |
+ *
+ * ⚠️ **本仓库也独立复测过账单**（`.cache/trae-billing-ab.mjs`，2026-11-02，
+ * 本机 CN 账号 + `glm-5.3-flash`，交错 A1→B1→A2→B2 两个全新前缀、每次读账前等
+ * 25 秒结算窗口，前缀 90905 token）：冷 1.7488 / 1.7540，**热 0.5024 / 0.5472**
+ * —— 同前缀第二次便宜约 3 倍，而这几帧的 `cache_read_input_tokens` 全是 0、
+ * `prompt_cache_pool_record` 全是 `null`。**折扣真实存在，字段确实没报。**
+ *
+ * ⚠️ `cluster` **不能**当缓存判据：实测常规档恒为 `normal_context`，其余取值
+ * （以及它到底是上下文档位还是路由分组）**未验证** —— 本仓库没有任何一条实测
+ * 把 `cluster` 与 Max 档或缓存状态对上。要用它之前先补探针，别照抄这段注释。
+ *
+ * ## ⚠️ 已知局限：非对称上报会让比率偏高
+ *
+ * 本规则「0 按未知、非 0 按命中」意味着：若哪天上游**恢复了非零上报却仍不给** 0
+ * （半恢复状态），命中率会只按命中的样本算 —— 例如 6 命中 / 4 未命中会显示
+ * 100% 且覆盖率 60%。这是「未知不计零」的固有性质，不是新缺陷：看板 KPI 的
+ * 副标题已经写明「覆盖率 X% · 未知不计零」，读数必须与覆盖率一起看。
+ * 真到那天，正确的修法是让上游把 0 也报出来（或恢复池记录），而不是在这里
+ * 用「最近见过非零就信 0」之类的跨请求状态去猜 —— 那种启发式一旦误判，就会
+ * 把整段时间的命中率算成 0%。
+ *
+ * 结论：在没有「本次挂了缓存池」这条上游声明时，0 **不是**「本次没命中」的
+ * 测量值，把它当 0% 写进账本等于替上游编造一个它没做的测量 —— 正是本次报障的
+ * 「缓存命中率未正确统计」。故调用点只在 `cachePoolAssigned === true` 时采信 0；
+ * 否则 0 / 缺失 / 非法一律按未知（宿主侧 `cacheSamples` 不计入，命中率分母随之
+ * 缩小、`cacheCoverage` 如实下降，界面显示「—」而不是编出来的 0%）。
+ *
+ * ⚠️ 代价与取舍：上游恢复分配缓存池之前，Trae 真的一次都没命中时也显示「—」。
+ * 这是刻意的 —— 在这段时间里客户端无法区分「真的 0」与「没给」，而本仓库的
+ * 既有口径就是「未知不计零」（见 `src/core/metrics.ts` 的 `cacheCoverage`）。
+ * 池记录一恢复非空，0% 立刻自动回来，无需再改代码。
+ *
+ * `inputTokens` 仍是 `prompt_tokens - 已知缓存`：未知时按全量输入计，与 Trae 的
+ * `total_tokens = prompt_tokens + completion_tokens` 自洽 —— 不会因为「少算
+ * 命中」把总 token 算小（少算总 token 会让宿主的自动压缩永不触发）。
+ */
+function traeCacheCount(usage: Record<string, unknown>, fields: readonly string[]): number | undefined {
+  let best: number | undefined
+  for (const field of fields) {
+    const raw = readPath(usage, field)
+    if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) continue
+    const value = Math.trunc(raw)
+    if (best === undefined || value > best) best = value
+  }
+  return best
+}
+
+/**
  * 推理档位 wire 值 → 展示名。
  *
  * ⚠️ 与 LobsterAI 不同，TRAE 的 `reasoning_effort_config.options` 是**单值**
@@ -1356,6 +1470,18 @@ export class TraeAdapter extends LlmAdapter {
     let buffer = ''
     let streamEnded = false
     let finishReason: 'stop' | 'tool_calls' | 'length' | undefined
+    /**
+     * 上游是否**明确**说本次请求挂了缓存池（`metadata.prompt_cache_pool_record`）。
+     *
+     * - `undefined`：该帧没有这个键 —— 老版本上游没有这套机制，无从判断；
+     * - `true`：非空记录 ⇒ `token_usage` 里的缓存计数是**测量值**，0 就是「本次未命中」；
+     * - `false`：显式 `null` ⇒ 上游说这次没挂池，计数不可采信（见 `traeCacheCount`）。
+     *
+     * ⚠️ 只在 `metadata` 帧到达时更新。若它晚于 `token_usage` 到达（当前实测是**早于**，
+     * 见 `.cache/trae-metadata-probe.mjs`），本次按 `undefined` 保守处理 —— 宁可显示
+     * 「未知」，也不把桩 0 当成未命中。
+     */
+    let cachePoolAssigned: boolean | undefined
     // SSE 事件累积状态（跨行累积 event + data）
     let currentEvent = ''
     let currentData = ''
@@ -1536,6 +1662,13 @@ export class TraeAdapter extends LlmAdapter {
                   }
                   break
                 }
+                case 'metadata': {
+                  // 缓存池记录：非空 = 本次挂了缓存池；显式 null = 明确没有。
+                  // 键缺失时 `parseTraeSSELine` 不会给这个属性，故保持 undefined
+                  // （老版本上游没有这套机制，不能据此说「没有池」）。
+                  if (ev.cachePoolRecord !== undefined) cachePoolAssigned = ev.cachePoolRecord !== null
+                  break
+                }
                 case 'token_usage': {
                   if (ev.usage !== undefined) {
                     const promptTokens = typeof ev.usage.prompt_tokens === 'number' ? ev.usage.prompt_tokens : 0
@@ -1543,17 +1676,27 @@ export class TraeAdapter extends LlmAdapter {
                     const reasoningTokens = typeof ev.usage.reasoning_tokens === 'number' ? ev.usage.reasoning_tokens : undefined
                     const counter = (value: unknown): number | undefined =>
                       typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
-                    const cacheReadTokens = counter(ev.usage.cache_read_input_tokens)
-                    const cacheWriteTokens = counter(ev.usage.cache_creation_input_tokens)
+                    // Local adaptation, live CN glm-5.3-flash 2026-10-21:
+                    // prompt_tokens includes cache (2727 input, 2688 read).
+                    // DSH counts ordinary input separately from cache.
+                    // *_total fields are zero placeholders in this response;
+                    // use the actual per-request counters.
+                    //
+                    // ⚠️ 2026-11-02: 两个计数经 {@link traeCacheCount} 取值，再由
+                    // `cachePoolAssigned` 决定 0 能不能采信（上游自 2026-10-27 起
+                    // 恒填 0 且不再分配缓存池）；全部证据写在该函数上。
+                    const accept = (value: number | undefined): number | undefined =>
+                      value === undefined
+                        ? undefined
+                        : value > 0 || cachePoolAssigned === true
+                          ? value
+                          : undefined
+                    const cacheReadTokens = accept(traeCacheCount(ev.usage, TRAE_CACHE_READ_FIELDS))
+                    const cacheWriteTokens = accept(traeCacheCount(ev.usage, TRAE_CACHE_WRITE_FIELDS))
                     const totalTokens = counter(ev.usage.total_tokens)
                     yield {
                       type: 'usage',
                       usage: {
-                        // Local adaptation, live CN glm-5.3-flash 2026-10-21:
-                        // prompt_tokens includes cache (2727 input, 2688 read).
-                        // DSH counts ordinary input separately from cache.
-                        // *_total fields are zero placeholders in this response;
-                        // use the actual per-request counters and preserve zero.
                         inputTokens: Math.max(0, promptTokens - (cacheReadTokens ?? 0) - (cacheWriteTokens ?? 0)),
                         outputTokens: completionTokens,
                         ...cacheReadTokens !== undefined ? { cacheReadTokens } : {},

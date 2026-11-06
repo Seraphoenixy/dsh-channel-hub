@@ -4,9 +4,11 @@ import {
   CodeArtsCatalogAuthError,
   SNAP_MODEL_BUILTIN_URL,
   isCodeArtsAuthFailure,
+  isCodeArtsTransientFailure,
   fetchCodeArtsRemoteModels,
 } from "../vendor/ofm/src/models.ts";
 import { CodeArtsAuth } from "../vendor/ofm/src/service.ts";
+import { CodeArtsAdapter } from "../vendor/ofm/src/llm-adapter.ts";
 import {
   STS_TOKEN_ENDPOINT,
   generateDpopKeyPair,
@@ -400,7 +402,6 @@ test("catalog and chat paths share the same auth-failure predicate", async () =>
   // 驱动两条路径」锁口径一致：聊天路径对 APIG.0602(400) 也必须触发
   // 静默续期重试（此前的判据只认 401/403 + 响应体，400 且非 JSON 文案
   // 的形态由共享判据兜住）。
-  const { CodeArtsAdapter } = await import("../vendor/ofm/src/llm-adapter.ts");
   let calls = 0;
   let refreshed = 0;
   const adapter = new CodeArtsAdapter({
@@ -437,4 +438,212 @@ test("catalog and chat paths share the same auth-failure predicate", async () =>
   assert.equal(calls, 2, "chat must retry once after APIG.0602");
   assert.equal(refreshed, 1);
   assert.equal(text.join(""), "OK");
+});
+
+/* ───────── 上游「网络繁忙」不得被当成密钥失效（2026-11-04 报障） ─────────
+ *
+ * 真实报文（现场抓包）：HTTP 403 +
+ * `{"error_code":"TM.00000001","error_msg":"网络繁忙，请稍后重试"}`。
+ * 旧实现把 403 一律归 `AUTH`，DSH 客户端对 `AUTH` 会把 message 整个替换成
+ * 固定文案「API 密钥无效」，用户于是被引向重新登录 —— 而当时凭据完全有效：
+ * 同一凭据同一时刻额度查询、目录刷新都成功，坏签名对照得到的是
+ * 401 APIG.0301（另一条判据）。
+ *
+ * 这里锁四件事：① 判据把「忙」排除出鉴权；② 聊天路径不续期、短退避后
+ * 按 `SERVER` 如实上抛，文案带 error_code；③ 目录路径对瞬时忙容忍、对
+ * 非鉴权 403 上抛（不能吞成空目录）；④ 真鉴权形态（APIG.0301 /
+ * APIG.0602 / 空体 403）仍然命中，不能因收紧 403 而漏掉自愈。
+ */
+
+const TRANSIENT_BUSY_BODY = '{"error_code":"TM.00000001","error_msg":"网络繁忙，请稍后重试"}';
+
+/** 极短退避，夹具不等真实 1s/3s 的默认间隔；用完删掉，避免影响其它用例。 */
+function withBusyRetryDelays(value, run) {
+  process.env.CODEARTS_BUSY_RETRY_DELAYS_MS = value;
+  return run().finally(() => {
+    delete process.env.CODEARTS_BUSY_RETRY_DELAYS_MS;
+  });
+}
+
+function chatRequest(model = "glm-5.3") {
+  return {
+    model,
+    signal: AbortSignal.timeout(10_000),
+    tools: [],
+    messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  };
+}
+
+function syntheticChatAdapter({ fetchImpl, onRefresh }) {
+  return new CodeArtsAdapter({
+    credentialRef: "SYNTHETIC_CODEARTS",
+    resolveCredential: async () => ({
+      access_key_id: "synthetic-ak",
+      secret_access_key: "synthetic-sk",
+      security_token: "synthetic-st",
+      // 未过期：入口预判不会续期，命中的只可能是失败分支里的判据。
+      expires_at: new Date(Date.now() + 2 * 3600_000).toISOString(),
+    }),
+    refresh: async () => {
+      onRefresh.calls += 1;
+    },
+    fetchRemoteModels: async () => [{ id: "glm-5.3", name: "GLM-5.3" }],
+    fetchImpl,
+  });
+}
+
+test("TM.00000001 busy codes are excluded from the auth predicate", () => {
+  assert.equal(isCodeArtsTransientFailure(TRANSIENT_BUSY_BODY), true);
+  // 403 / 401 承载「网络繁忙」时都不是凭据问题 —— 续期救不了，还会白烧
+  // refresh_token（华为 STS 每次签发作废旧 refresh_token）。
+  assert.equal(isCodeArtsAuthFailure(403, TRANSIENT_BUSY_BODY), false);
+  assert.equal(isCodeArtsAuthFailure(401, TRANSIENT_BUSY_BODY), false);
+  assert.equal(isCodeArtsAuthFailure(200, "Network busy. Try again later."), false);
+  // 403 的其它非鉴权语义（权限不足）同样不得触发续期。
+  assert.equal(isCodeArtsAuthFailure(403, '{"error_code":"TM.00001005"}'), false);
+  // 收紧 403 之后，真鉴权形态必须仍然命中（否则过期令牌不再自愈）。
+  assert.equal(
+    isCodeArtsAuthFailure(403, '{"error_code":"APIG.0301","error_msg":"verify ak sk signature fail"}'),
+    true,
+  );
+  assert.equal(isCodeArtsAuthFailure(403, '{"error_code":"APIG.0602"}'), true);
+  assert.equal(isCodeArtsAuthFailure(403, ""), true);
+});
+
+test("directory tolerates a transient busy 403 instead of renewing", async () => {
+  const models = await fetchCodeArtsRemoteModels(
+    { access_key_id: "synthetic-ak", secret_access_key: "synthetic-sk", security_token: "synthetic-st" },
+    async () => new Response(TRANSIENT_BUSY_BODY, {
+      status: 403,
+      headers: { "content-type": "application/json" },
+    }),
+  );
+  // 保持旧目录（空列表 → 目录快照不落盘），不抛错、不触发续期。
+  assert.deepEqual(models, []);
+});
+
+test("directory surfaces a non-auth 403 instead of emptying the catalog", async () => {
+  const body = '{"error_code":"TM.00001005","error_msg":"Insufficient permissions"}';
+  await assert.rejects(
+    fetchCodeArtsRemoteModels(
+      { access_key_id: "synthetic-ak", secret_access_key: "synthetic-sk", security_token: "synthetic-st" },
+      async () => new Response(body, {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      }),
+    ),
+    (error) => {
+      // 权限/禁用类 403 不是鉴权失败：不能续期（无效动作），但必须可见 ——
+      // 吞成空列表会让模型菜单被一条空快照清空且没有任何错误提示。
+      assert.ok(!(error instanceof CodeArtsCatalogAuthError));
+      assert.match(error.message, /HTTP 403/);
+      assert.match(error.message, /TM\.00001005/);
+      return true;
+    },
+  );
+});
+
+test("chat 403 TM.00000001 retries as transient and never renews the credential", async () => {
+  await withBusyRetryDelays("1,1", async () => {
+    let calls = 0;
+    const onRefresh = { calls: 0 };
+    const adapter = syntheticChatAdapter({
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response(TRANSIENT_BUSY_BODY, {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        });
+      },
+      onRefresh,
+    });
+
+    let caught;
+    await assert.rejects(
+      async () => {
+        // 瞬时失败不应产出任何内容块，drain 即可。
+        for await (const _chunk of adapter.stream(chatRequest())) {
+        }
+      },
+      (error) => {
+        caught = error;
+        return true;
+      },
+    );
+
+    assert.equal(calls, 3, "1 次首发 + 2 次退避重试");
+    assert.equal(onRefresh.calls, 0, "瞬时繁忙不得触发续期");
+    assert.equal(caught.code, "SERVER", "归为可重试的服务端失败，而不是 AUTH");
+    assert.notEqual(caught.code, "AUTH", "AUTH 会被 UI 替换成「API 密钥无效」");
+    assert.match(caught.message, /TM\.00000001/);
+    assert.match(caught.message, /网络繁忙/);
+  });
+});
+
+test("chat recovers from a transient busy 403 within the bounded retry", async () => {
+  await withBusyRetryDelays("1", async () => {
+    let calls = 0;
+    const onRefresh = { calls: 0 };
+    const adapter = syntheticChatAdapter({
+      fetchImpl: async () => {
+        calls += 1;
+        if (calls === 1) {
+          return new Response(TRANSIENT_BUSY_BODY, {
+            status: 403,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(
+          'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n' +
+            'data: {"choices":[{"finish_reason":"stop"}]}\n\n',
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      },
+      onRefresh,
+    });
+
+    const text = [];
+    for await (const chunk of adapter.stream(chatRequest())) {
+      if (chunk.type === "text-delta" || chunk.type === "text") text.push(chunk.text ?? "");
+    }
+    assert.equal(calls, 2, "退避重试后应恢复，不抛错");
+    assert.equal(onRefresh.calls, 0);
+    assert.equal(text.join(""), "OK");
+  });
+});
+
+test("non-auth 403 keeps the upstream code in the message and is not AUTH", async () => {
+  const body = '{"error_code":"TM.00001005","error_msg":"Insufficient permissions"}';
+  let chatCalls = 0;
+  const onRefresh = { calls: 0 };
+  const adapter = syntheticChatAdapter({
+    // 只模拟聊天端点；排队探测端点返回 503（不可达 → undefined）。
+    fetchImpl: async (url) => {
+      if (String(url).includes("/chat/completions")) {
+        chatCalls += 1;
+        return new Response(body, {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("unavailable", { status: 503 });
+    },
+    onRefresh,
+  });
+
+  await assert.rejects(
+    async () => {
+      for await (const _chunk of adapter.stream(chatRequest())) {
+        // drain
+      }
+    },
+    (error) => {
+      assert.equal(error.code, "PERMISSION_DENIED");
+      assert.match(error.message, /TM\.00001005/);
+      assert.match(error.message, /Insufficient permissions/);
+      return true;
+    },
+  );
+  assert.equal(onRefresh.calls, 0, "权限类 403 也不得续期");
+  assert.equal(chatCalls, 1, "非鉴权 403 不做鉴权重试");
 });

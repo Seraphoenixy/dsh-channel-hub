@@ -297,6 +297,23 @@ export class Observer {
         frame =
           typeof frame.body === "string" ? JSON.parse(frame.body) : frame.body;
       if (!frame || typeof frame !== "object") return;
+      /**
+       * Trae 的缓存池诊断帧（`event: metadata` 的 `prompt_cache_pool_record`）。
+       *
+       * ⚠️ 先于下面的 usage 分支处理，且**不能**用取值判空：显式 `null`（上游
+       * 明说本次没挂缓存池）与「没有这个键」（该版本没有这套机制）是两种结论。
+       * 界面据此把「—」补上原因（见 `src/client.ts` 的 `cacheUnknownNote`）。
+       *
+       * ⚠️ 这里按裸 `data:` 行独立解析：若上游哪天把该 JSON 拆成多行 `data:`
+       * （适配器的 `currentData +=` 支持这种形态），本函数解析失败 → 不记池
+       * 记录 → 适配器按「未知」处理（保守，不编数字）。实测目前是单行。
+       */
+      if ("prompt_cache_pool_record" in frame) {
+        const pool = (frame as Record<string, unknown>)
+          .prompt_cache_pool_record;
+        if (pool === null) a.cachePool = null;
+        else a.cachePool = (JSON.stringify(pool) ?? String(pool)).slice(0, 200);
+      }
       const error =
         frame.error ??
         (!Array.isArray(frame.choices) &&

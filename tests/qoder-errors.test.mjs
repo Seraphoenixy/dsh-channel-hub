@@ -2,6 +2,55 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { consumeOpenAiSse } from "../vendor/ofm/src/openai-compat.ts";
 import { unwrapQoderEnvelopeStream } from "../vendor/ofm/src/qoder-envelope.ts";
+import { QODER_CN } from "../vendor/ofm/src/qoder-product.ts";
+import { QoderEncryptedInfer, __testing } from "../vendor/ofm/src/qoder-wasm.ts";
+
+test("Qoder WASM reuses memory across large encrypted requests", async (t) => {
+  __testing.resetGlue();
+  t.after(() => __testing.resetGlue());
+  const instantiate = WebAssembly.instantiate;
+  let memory;
+  t.mock.method(WebAssembly, "instantiate", async (module, imports) => {
+    const instance = await instantiate(module, imports);
+    memory = instance.exports.memory;
+    return instance;
+  });
+
+  const ask = {
+    modelKey: "dfmodel",
+    userText: "fixture",
+    history: [{
+      role: "user",
+      content: [{
+        type: "image_url",
+        image_url: { url: "data:image/png;base64," + "A".repeat(4 * 1024 * 1024) },
+      }],
+    }],
+  };
+  async function prepare() {
+    const client = await QoderEncryptedInfer.create({
+      user: { uid: "fixture", securityOauthToken: "fixture" },
+      machineId: "fixture-device",
+      metadata: QODER_CN.clientMetadata,
+      host: QODER_CN.encryptedInferBase,
+    });
+    try {
+      const request = client.prepareInfer(ask);
+      assert.equal(new URL(request.url).origin, QODER_CN.encryptedInferBase);
+      assert.ok(new Headers(request.headers).get("authorization")?.startsWith("Bearer COSY."));
+      assert.ok(request.body.length > 4 * 1024 * 1024);
+    } finally {
+      client.dispose();
+    }
+  }
+
+  await prepare();
+  await prepare();
+  const warmBytes = memory.buffer.byteLength;
+  for (let i = 0; i < 12; i++) await prepare();
+  assert.ok(memory.buffer.byteLength <= warmBytes + 16 * 1024 * 1024,
+    `WASM memory grew from ${warmBytes} to ${memory.buffer.byteLength} bytes`);
+});
 
 /**
  * 实测形态（2026-10-20 只读探针，真实账号）：Qoder CN 的额度与排队错误

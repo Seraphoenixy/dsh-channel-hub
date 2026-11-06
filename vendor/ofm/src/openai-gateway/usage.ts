@@ -34,9 +34,12 @@
  * | raccoon 会话末 | 未命中 770 + 命中 207488 | `total_tokens: 1403` | **0.15%** | **21.92%** |
  * | trae 会话末 | 未命中 326134（trae 无缓存） | `total_tokens: 326742` | **34.39%** | 34.33% |
  *
- * trae 之所以「正常」**不是它被修好了，而是它不报缓存** ——
+ * trae 之所以「正常」**不是它被修好了，而是它当时不报缓存** ——
  * `trae-adapter.ts` 的 `token_usage` 只读 `prompt_tokens` / `completion_tokens`，
  * 从不算 `cacheReadTokens`，于是旧的 `inputTokens + outputTokens` 恰好等于完整上下文。
+ * （2026-11-02 注：这条只描述当时的形态。之后 trae 先补上了缓存字段映射，又在
+ * 2026-10-27 被上游停掉了上报 —— 现行口径见 `trae-adapter.ts` 的 `traeCacheCount`；
+ * 本文件的分支逻辑不依赖 trae 报不报缓存。）
  *
  * Codex 自己的判据（`agcodex_protocol::protocol::TokenUsage`，
  * 与 openai/codex 的 `tokens_in_context_window` 同源）：
