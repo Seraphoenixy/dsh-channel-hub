@@ -2,6 +2,16 @@ import { authorizationLink } from "../host/browser.ts";
 import { channelFetch as fetch } from "./user-agent.ts";
 import { rateLabel } from "../core/rate.ts";
 import { extendedTierLabel } from "../core/context.ts";
+import {
+  applyProbeOutcome,
+  catalogVersionProbeAtKey,
+  effectiveVersion,
+  loadDeclaredVersion,
+  probeIntervalMs,
+  rollbackAdoption,
+  runVersionProbe,
+  saveDeclaredVersion,
+} from "../core/declared-version.ts";
 import { promotionsFromConfig } from "../core/promotion.ts";
 import { AccountPool } from "../../vendor/ofm/src/account-pool.ts";
 import { CodeArtsAuth } from "../../vendor/ofm/src/service.ts";
@@ -17,10 +27,10 @@ import {
   fetchAuthState,
   decorateLoginUrl,
 } from "../../vendor/ofm/src/buddy-oauth.ts";
-import { parseQoderRemoteModels } from "../../vendor/ofm/src/qoder-catalog.ts";
+import { parseQoderCatalogModels } from "./qoder-catalog.ts";
 import { QoderAuth } from "../../vendor/ofm/src/qoder-auth.ts";
 import { QoderAdapter } from "../../vendor/ofm/src/qoder-adapter.ts";
-import { QODER, QODER_CN } from "../../vendor/ofm/src/qoder-product.ts";
+import { QODER_CN } from "../../vendor/ofm/src/qoder-product.ts";
 import { TraeAuth } from "../../vendor/ofm/src/trae-auth.ts";
 import { TraeAdapter } from "../../vendor/ofm/src/trae-adapter.ts";
 import { TRAE } from "../../vendor/ofm/src/trae-product.ts";
@@ -46,7 +56,7 @@ import { discoverGemini } from "./gemini-catalog.ts";
 import { syncQoderAccountName } from "./qoder-identity.ts";
 import { AccountSelection } from "../core/account-selection.ts";
 import { configureHubCache } from "../../vendor/ofm/src/models.ts";
-import { buildCosyHeaders } from "../../vendor/connect/cosy.js";
+import { buildCosyHeaders, COSY_VERSION } from "../../vendor/connect/cosy.js";
 import {
   fetchCreditBalanceDetailed,
   claimDailyCheckin,
@@ -81,7 +91,8 @@ const specs = [
   // 只是一个渠道，不能拆成两个条目重复登录。
   ["buddy", "CodeBuddy / WorkBuddy CN", BuddyAuth, BuddyAdapter, CODEBUDDY],
   ["workbuddy", "WorkBuddy 国际版", BuddyAuth, BuddyAdapter, WORKBUDDY],
-  ["qoder", "Qoder 国际版", QoderAuth, QoderAdapter, QODER],
+  // Qoder 只保留中国版渠道；国际版（旧 `qoder`）已移除，历史账号走
+  // 孤儿账号机制（`accounts.orphans` / `accounts.delete`），不会静默删除。
   ["qodercn", "Qoder CN", QoderAuth, QoderAdapter, QODER_CN],
   // 旧 SOLO 已并入 Trae CN IDE，只保留一个 Trae 渠道；登录仍走 OFM 的
   // TraeAuth/ExchangeToken，仅把客户端与版本身份换成现役 CN IDE。
@@ -104,6 +115,16 @@ const specs = [
   ["raccoon", "Raccoon", RaccoonAuth, RaccoonAdapter, RACCOON],
   ["gemini", "Gemini", GeminiAuth, GeminiAdapter, GEMINI],
 ];
+/**
+ * 目录声明版本自动更新的启用名单（策略见 `src/core/declared-version.ts`）。
+ *
+ * ⚠️ 只收**已验证存在版本闸门**的渠道（AGENTS.md：静态规则只用于经过验证的
+ * 协议映射）。本期只有 qodercn —— 目录平面 `Cosy-Version` 的 `minimal_version`
+ * 闸门有实测记录（`vendor/ofm/src/qoder-catalog.ts`）。trae 的 `ideVersion`
+ * 是**推理端**准入版本（只能用真实推理探测，耗积分）、gemini 身份「一个字符
+ * 不同都可能被识别」，都不进来。
+ */
+const CATALOG_VERSION_PROVIDERS = new Set(["qodercn"]);
 const parse = (value) => {
   try {
     return JSON.parse(value);
@@ -251,6 +272,19 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
         fetchImpl: directoryFetch,
       });
       const renewalJobs = new Map();
+      /**
+       * 目录声明版本状态（仅启用名单内的渠道非 undefined，策略见
+       * `src/core/declared-version.ts`）。⚠️ 必须用 `let`：采纳与回滚都要
+       * 原地替换状态并落盘，闭包读到的永远是当前值。
+       */
+      let versionState = CATALOG_VERSION_PROVIDERS.has(id)
+        ? await loadDeclaredVersion(store, id, COSY_VERSION)
+        : undefined;
+      /** 最近一次版本事件（采纳/回滚）的留痕，`models.refresh` 聚合时消费。 */
+      let versionNote;
+      let versionNoteAt = 0;
+      /** 探测轮单飞标记。 */
+      let versionProbe;
       const renewAccount = async (a) => {
         const existing = renewalJobs.get(a.id);
         if (existing) return existing;
@@ -408,13 +442,81 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
             }),
       };
       let adapter = new Adapter(options);
+      /**
+       * Qoder 目录请求（只读 GET，`Encode=1`）。
+       *
+       * `version` 传入时覆盖 `Cosy-Version` 头与签名载荷里的 `cosyVersion`
+       * （`buildCosyHeaders` 的 overrides，两处同值、同一次签名覆盖）；
+       * undefined = vendor 基线常量。
+       *
+       * ⚠️ 错误带 `probeKind` 标记（"hard" | "transient"），供版本探测分类：
+       * 4xx 与协议形状异常是**确定性**失败（该候选记入硬拒绝，不再试）；
+       * 网络/超时/5xx 是**瞬态**（不记，下轮再试）。未标记的异常一律按瞬态
+       * 处理 —— 探测宁可漏一轮，不能把偶发故障错记成「该版本被拒」。
+       */
+      const fetchQoderCatalog = async (c, version) => {
+        const url =
+          product.encryptedInferBase + "/algo/api/v2/model/list?Encode=1";
+        let response;
+        try {
+          response = await fetch(url, {
+            headers: buildCosyHeaders(
+              null,
+              url,
+              {
+                userID: c.uid,
+                authToken: c.security_oauth_token ?? c.access_token,
+                machineID: c.machine_id,
+              },
+              version === undefined ? undefined : { cosyVersion: version },
+            ),
+            signal: AbortSignal.timeout(30000),
+          });
+        } catch (e) {
+          throw Object.assign(Error("目录请求失败：" + redact(e)), {
+            probeKind: "transient",
+          });
+        }
+        if (!response.ok) {
+          // 与 `directoryFetch` 同口径：带上响应体里的业务码/原因。
+          // ⚠️ HTTP 状态一律按瞬态处理（不标记 probeKind）：429/5xx/限流
+          // 甚至 401（凭据临期）都不代表「该版本被拒」——把状态类失败记成
+          // 硬拒绝会让候选阶梯被一次限流永久拉黑（真实缺陷，2026-11-08）。
+          let detail = "";
+          try {
+            detail = await response.text();
+          } catch {
+            detail = "";
+          }
+          throw Error(describeHttpFailure("目录", response.status, detail));
+        }
+        let raw;
+        try {
+          raw = await response.json();
+        } catch {
+          // 形状级失败（JSON 都解不出来）：回滚判据据此区分「该版本真的
+          // 不被支持」与「一次网络/服务端抖动」。
+          throw Object.assign(Error("目录不是有效 JSON"), {
+            probeKind: "shape",
+          });
+        }
+        // chat + app 两场景合并（QoDuck 只在 app 场景下发，见
+        // `src/drivers/qoder-catalog.ts`）；探测的「集合增益」判定与发现
+        // 用同一个解析，口径才不会分叉。
+        const parsed = parseQoderCatalogModels(raw);
+        if (!parsed)
+          throw Object.assign(Error("目录缺少 chat/app 场景"), {
+            probeKind: "shape",
+          });
+        return parsed;
+      };
       const discover = async (account) =>
         directoryContext.run({}, async () => {
           const p = scopedPool(account),
             c = await read(account);
           if (!c) throw Error("账号凭据不可读取");
           let models;
-          if (id === "qoder" || id === "qodercn") {
+          if (id === "qodercn") {
             await syncQoderAccountName({
               fetcher: fetch,
               account, credential: c, product,
@@ -422,30 +524,51 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
               readCredential: read,
               updateAccount: (accountId, patch) => pool.updateAccount(accountId, patch),
             }).catch((error) => ctx.logger.warn("Qoder 账号名称更新失败：" + redact(error)));
-            const url =
-              product.encryptedInferBase + "/algo/api/v2/model/list?Encode=1";
-            const response = await fetch(url, {
-              headers: buildCosyHeaders(null, url, {
-                userID: c.uid,
-                authToken: c.security_oauth_token ?? c.access_token,
-                machineID: c.machine_id,
-              }),
-              signal: AbortSignal.timeout(30000),
-            });
-            if (!response.ok) {
-              // 与 `directoryFetch` 同口径：带上响应体里的业务码/原因。
-              let detail = "";
+            try {
+              models = await fetchQoderCatalog(c, effectiveVersion(versionState));
+            } catch (e) {
+              if (!versionState?.adopted) throw e;
+              // 已采纳版本失败 → 基线兜底重试一次；基线也失败则保留原错误，
+              // 走既有的 stale 快照失败路径（不自作主张换错误语义）。
+              //
+              // ⚠️ **只有形状级失败才清除采纳**（probeKind === "shape"，即
+              // JSON/场景解析不了 —— 说明该版本真的不再被服务端支持）：
+              // HTTP/网络类失败是瞬态的，一点抖动就回滚会把刚解锁的模型
+              // 撤下去最长 24h（探测闸已置位）。瞬态时**只对本轮**退回基线，
+              // 保留采纳，下一轮刷新继续尝试已采纳版本。
+              // ⚠️ 清除前复核 `adopted.version === rolled`：并发探测可能刚
+              // 采纳了更新的版本，不能把它一起抹掉。
+              const rolled = versionState.adopted.version;
               try {
-                detail = await response.text();
+                models = await fetchQoderCatalog(c, versionState.baseline);
               } catch {
-                detail = "";
+                throw e;
               }
-              throw Error(describeHttpFailure("目录", response.status, detail));
+              if (e?.probeKind === "shape") {
+                if (versionState.adopted?.version === rolled) {
+                  versionState = rollbackAdoption(versionState);
+                  await saveDeclaredVersion(store, id, versionState).catch(() => {});
+                  versionNote =
+                    name +
+                    " 目录版本 " +
+                    rolled +
+                    " 已失效，已回滚到 " +
+                    versionState.baseline;
+                  versionNoteAt = Date.now();
+                  ctx.logger.warn(versionNote + "：" + redact(e));
+                }
+              } else {
+                ctx.logger.warn(
+                  name +
+                    " 目录版本 " +
+                    rolled +
+                    " 请求失败（瞬态），本轮以基线 " +
+                    versionState.baseline +
+                    " 兜底：" +
+                    redact(e),
+                );
+              }
             }
-            const raw = await response.json();
-            if (!Array.isArray(raw.chat)) throw Error("目录缺少 chat 数组");
-            models = parseQoderRemoteModels(raw);
-            if (!models) throw Error("无法识别 Qoder 目录");
           } else if (id === "codearts") models = await auth.refreshModels(p);
           else if (id === "loomy") {
             const res = await fetch(LOOMY.apiBase + "/models", {
@@ -505,6 +628,87 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
             return promotion === undefined ? model : { ...model, promotion };
           });
         });
+      /**
+       * 目录版本探测轮（旁路，策略见 `src/core/declared-version.ts`）。
+       *
+       * ⚠️ 三条纪律：① 单飞 —— 探测中再来的 reload 复用同一轮；② 时间闸
+       * （默认 24h，`CHANNEL_HUB_VERSION_PROBE_MIN_MS` 可覆盖）—— 先落
+       * `catalog-version-probe-at` 再探测，探测挂了也把下一轮推到闸门外，
+       * 避免每次刷新都白打一批请求；③ 全吞异常 —— 探测是锦上添花，绝不能
+       * 让「更新模型」失败。
+       *
+       * 探测用的凭据取**第一个启用账号**（目录请求按账号鉴权，任意账号皆可）；
+       * 当前模型集取本轮成功快照的并集。返回本轮 ProbeOutcome（未探测/出错
+       * 返回 undefined），reload 据此决定是否用新版本当场重刷快照。
+       */
+      const maybeProbeVersion = async (accounts, snapshots) => {
+        if (!versionState || versionProbe) return versionProbe;
+        versionProbe = (async () => {
+          try {
+            const usable = snapshots.filter(
+              (s) => !s?.error && Array.isArray(s.models),
+            );
+            const account = accounts.find((a) => a.enabled);
+            if (usable.length === 0 || !account) return undefined;
+            const c = await read(account);
+            if (!c) return undefined;
+            const now = Date.now();
+            const lastAt = await store.call(
+              "get",
+              catalogVersionProbeAtKey(id),
+            );
+            if (typeof lastAt === "number" && now - lastAt < probeIntervalMs())
+              return undefined;
+            await store.call("set", catalogVersionProbeAtKey(id), now);
+            const currentIds = [
+              ...new Set(usable.flatMap((s) => s.models.map((m) => m.id))),
+            ];
+            const outcome = await runVersionProbe({
+              state: versionState,
+              currentIds,
+              fetchCandidate: async (version) => {
+                try {
+                  const candidate = await fetchQoderCatalog(c, version);
+                  return { ok: true, ids: candidate.map((m) => m.id) };
+                } catch (e) {
+                  // ⚠️ 请求级失败（网络/HTTP/形状）一律瞬态：探测每轮并发
+                  // 打同一端点，最容易被限流的就是这批请求；把 429/5xx 记成
+                  // 硬拒绝会让候选阶梯被一次限流永久拉黑。真正的硬拒绝只有
+                  // `runVersionProbe` 里的「候选缺既有模型」（确定性结果）。
+                  return { ok: false, transient: true, reason: redact(e) };
+                }
+              },
+            });
+            const next = applyProbeOutcome(versionState, outcome);
+            const changed =
+              next.adopted?.version !== versionState.adopted?.version ||
+              next.rejected.length !== versionState.rejected.length;
+            versionState = next;
+            if (changed)
+              await saveDeclaredVersion(store, id, versionState).catch(() => {});
+            if (outcome.adopted) {
+              versionNote =
+                name +
+                " 目录版本 " +
+                outcome.adopted.from +
+                "→" +
+                outcome.adopted.version +
+                "，新增 " +
+                outcome.adopted.added +
+                " 个模型";
+              versionNoteAt = Date.now();
+              ctx.logger.warn(versionNote);
+            }
+            return outcome;
+          } catch (e) {
+            ctx.logger.warn("目录版本探测失败（已忽略）：" + redact(e));
+            return undefined;
+          } finally {
+            versionProbe = undefined;
+          }
+        })();
+        return versionProbe;
+      };
       const hydrate = async () => {
         const requested = await selection.get(id);
         const snapshots = await Promise.all(
@@ -522,12 +726,26 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
       };
       const reload = async () => {
         const accounts = pool.listAccountsByProvider(id);
-        const results = await Promise.all(
+        let results = await Promise.all(
           accounts.map((a) =>
             catalog.refresh(id + ":" + a.id, () => discover(a)),
           ),
         );
         await hydrate();
+        // 目录版本探测（仅启用策略的渠道）：本轮有成功快照才值得探测；
+        // 采纳了更高版本就**当场重刷**快照并重建适配器，新模型立刻进菜单，
+        // 而不是等下一次手动刷新。
+        if (versionState && results.some((s) => !s?.error)) {
+          const outcome = await maybeProbeVersion(accounts, results);
+          if (outcome?.adopted) {
+            results = await Promise.all(
+              accounts.map((a) =>
+                catalog.refresh(id + ":" + a.id, () => discover(a)),
+              ),
+            );
+            await hydrate();
+          }
+        }
         try {
           ctx.emit("llm/adapters-updated");
         } catch (e) {
@@ -647,7 +865,7 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
         }
         if (id === "buddy" || id === "workbuddy")
           return fetchCreditBalanceDetailed(c, product, fetch);
-        if (id.startsWith("qoder"))
+        if (id === "qodercn")
           return fetchQoderCreditBalanceDetailed(c, product, fetch);
         if (id.startsWith("trae"))
           return fetchTraeCreditBalanceDetailed(c, product, fetch);
@@ -662,7 +880,6 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
       const claim = [
         "codearts",
         "buddy",
-        "qoder",
         "qodercn",
         "trae",
         "loomy",
@@ -673,7 +890,7 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
             if (!c) throw Error("凭据不可读取");
             if (id === "codearts") return claimCodeArtsDailyCheckin(c, fetch);
             if (id === "buddy") return claimDailyCheckin(c, product, fetch);
-            if (id.startsWith("qoder"))
+            if (id === "qodercn")
               return claimQoderDailyCheckin(c, product, fetch);
             if (id.startsWith("trae"))
               return claimTraeDailyCheckin(
@@ -702,6 +919,34 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
         claim,
         renew: renewAccount,
         discover,
+        /**
+         * 目录声明版本（仅启用策略的渠道非 undefined；`channels.list` 观测用）。
+         * 读的是闭包里的可变状态 —— 采纳/回滚后无需重建驱动即反映当前值。
+         */
+        declaredVersion: versionState
+          ? () => ({
+              version: effectiveVersion(versionState),
+              baseline: versionState.baseline,
+              adopted: versionState.adopted !== undefined,
+              ...(versionState.adopted
+                ? { adoptedAt: versionState.adopted.adoptedAt }
+                : {}),
+            })
+          : undefined,
+        /**
+         * 消费版本事件留痕（采纳/回滚各一条，`models.refresh` 全量聚合上报）。
+         * ⚠️ 带时效：单渠道路径不消费它，超过 10 分钟的滞留留痕不再上报，
+         * 避免下一次全量刷新吐出一条过期消息。
+         */
+        consumeVersionNote: versionState
+          ? () => {
+              const note = versionNote;
+              versionNote = undefined;
+              return note !== undefined && Date.now() - versionNoteAt < 600000
+                ? note
+                : undefined;
+            }
+          : undefined,
         /**
          * 该渠道是否支持「大窗口档」（目前只有 Trae 的 Max 1M 档）。
          *

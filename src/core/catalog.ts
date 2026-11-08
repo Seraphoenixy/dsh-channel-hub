@@ -50,7 +50,14 @@ export class CatalogService {
             delete m.priceFactor;
         }
         const next = { models, updated: Date.now(), stale: false };
-        await this.store.call("set", "catalog:" + key, next);
+        try {
+          await this.store.call("set", "catalog:" + key, next);
+        } catch {
+          // ⚠️ 落库失败 ≠ 目录失败：`set` 若和上面的 fetch 同在一个 try，
+          // 存储忙时（worker 单线程被大查询/prune 拖住）会把**刚发现的整份
+          // 新目录**丢弃并报成「目录失败」。这里只放弃持久化 —— 新模型进
+          // 内存缓存立即可用，代价仅是重启后回退旧快照。
+        }
         this.cache.set(key, next);
         return next;
       } catch (e) {

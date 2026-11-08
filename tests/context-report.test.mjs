@@ -13,6 +13,7 @@ import {
   configureHubCache,
   fetchCodeArtsRemoteModels,
   isCodeArtsBenefitModel,
+  isCodeArtsImageCapable,
   isVisualModelId,
   parseModelInfo,
 } from "../vendor/ofm/src/models.ts";
@@ -202,6 +203,39 @@ test("VL filtering is case-insensitive and shared by both call sites", () => {
   for (const id of visual) assert.equal(isVisualModelId(id), true, `${id} must be visual`);
   const chat = ["glm-5.3", "GLM-5.2", "claude-sonnet", "vl-only-prefix", "model-vlr"];
   for (const id of chat) assert.equal(isVisualModelId(id), false, `${id} must not be visual`);
+});
+
+/* ──────────────────── 收图能力（目录解析 + 实测覆盖表） ──────────────────── */
+
+test("parseModelInfo forwards supports_images from the directory", () => {
+  const base = { model_id: "deepseek-v4.1-flash", model_name: "DeepSeek V4.1 Flash" };
+  // 目录明说 true 才透传；false / 缺失都不补值。
+  assert.deepEqual(parseModelInfo({ ...base, supports_images: true }, new Set()), {
+    id: "deepseek-v4.1-flash",
+    name: "DeepSeek V4.1 Flash",
+    supportsImages: true,
+  });
+  assert.deepEqual(parseModelInfo({ ...base, supports_images: false }, new Set()), {
+    id: "deepseek-v4.1-flash",
+    name: "DeepSeek V4.1 Flash",
+  });
+  assert.deepEqual(parseModelInfo(base, new Set()), {
+    id: "deepseek-v4.1-flash",
+    name: "DeepSeek V4.1 Flash",
+  });
+});
+
+test("isCodeArtsImageCapable unions the wire-verified overrides with the directory claim", () => {
+  // 覆盖表（2026-11-05 wire 实测：目录标 false 但能收图），大小写不敏感。
+  assert.equal(isCodeArtsImageCapable("deepseek-v4.1-flash"), true);
+  assert.equal(isCodeArtsImageCapable("DeepSeek-V4.1-Flash-1017"), true);
+  // 目录声明的 supports_images 为 true 时动态放行。
+  assert.equal(isCodeArtsImageCapable("glm-5.3", { supportsImages: true }), true);
+  // 目录标 false（或不带目录条目）且不在覆盖表 → 不能收图（实测 glm-5.3 对照组 406）。
+  assert.equal(isCodeArtsImageCapable("glm-5.3"), false);
+  assert.equal(isCodeArtsImageCapable("glm-5.3", { supportsImages: false }), false);
+  // 目录 true 但覆盖表外：仍按目录 —— 覆盖表只是补充，不是唯一开关。
+  assert.equal(isCodeArtsImageCapable("kimi-k3", { supportsImages: true }), true);
 });
 
 test("parseModelInfo drops a lowercase VL model instead of forwarding it", () => {

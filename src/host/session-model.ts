@@ -32,6 +32,12 @@ export function installSessionModelIsolation(ctx: any) {
       const { reasoningEffort: _effort, ...rest } = result;
       return { ...rest, ...assembled };
     }, { prepend: true });
-    ctx.effect(() => () => { offAssembly(); offRequest(); });
+    // 清理必须挂在**会话自己的 scope** 上：挂在插件 scope 的 effect 每条
+    // 会话累积一条、直到插件卸载才执行，闭包经 offAssembly/offRequest 持有
+    // 整个 session —— 内存随会话数单调增长（真实缺陷，2026-11-08 审查发现）。
+    // 会话 scope 结束（或插件卸载级联 dispose 子 scope）时清理，两个时机都覆盖。
+    const cleanup = () => { offAssembly(); offRequest(); };
+    if (typeof agent.ctx.effect === "function") agent.ctx.effect(() => cleanup);
+    else ctx.effect(() => cleanup);
   });
 }

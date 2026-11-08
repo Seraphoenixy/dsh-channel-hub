@@ -1041,7 +1041,10 @@ var CatalogService = class {
             delete m.priceFactor;
         }
         const next = { models, updated: Date.now(), stale: false };
-        await this.store.call("set", "catalog:" + key, next);
+        try {
+          await this.store.call("set", "catalog:" + key, next);
+        } catch {
+        }
         this.cache.set(key, next);
         return next;
       } catch (e) {
@@ -2008,7 +2011,7 @@ function convertLegacy(provider, document) {
       enterprise_id: c.enterprise_id ?? c.enterpriseId,
       account_type: c.account_type ?? c.accountType
     };
-  } else if (provider === "qoder" || provider === "qodercn") {
+  } else if (provider === "qodercn") {
     const machine = c.machine_id ?? c.machineID ?? c.machineId;
     if (!(c.token ?? c.access_token) || !c.uid || !machine) return;
     credential = {
@@ -2088,7 +2091,6 @@ var MigrationService = class {
         region: i === 3 ? "global" : "cn"
       })),
       { id: "qoder", kind: "qoder", region: "cn" },
-      { id: "qoder-global", kind: "qoder", region: "global" },
       { id: "trae", kind: "trae", region: "cn" }
     ];
     const entries = Array.isArray(registry) ? registry : registry?.channels ?? registry?.entries ?? defaults;
@@ -2120,16 +2122,16 @@ var MigrationService = class {
     for (const a of entries) {
       if (typeof a.id !== "string" || !/^[-\w]+$/.test(a.id)) continue;
       const kind = a.kind ?? a.type;
-      let provider = kind === "workbuddy" ? a.region === "global" ? "workbuddy" : "buddy" : kind === "qoder" ? a.region === "global" ? "qoder" : "qodercn" : kind === "trae" ? "trae" : void 0;
+      let provider = kind === "workbuddy" ? a.region === "global" ? "workbuddy" : "buddy" : kind === "qoder" ? a.region === "global" ? void 0 : "qodercn" : kind === "trae" ? "trae" : void 0;
       if (!provider) continue;
-      const filename = kind === "qoder" ? provider === "qoder" ? "qoder-global-session.json" : "qoder-session.json" : a.id + ".json";
+      const filename = kind === "qoder" ? "qoder-session.json" : a.id + ".json";
       const document = await this.json(
         join(this.home, "connect-auth", filename)
       );
       if (!document && !registry) continue;
       const converted = convertLegacy(provider, document);
       provider = converted?.provider ?? provider;
-      const oldProvider = kind === "qoder" ? provider === "qoder" ? "qoder2" : "qoder1" : a.id;
+      const oldProvider = kind === "qoder" ? "qoder1" : a.id;
       const disabled = Object.fromEntries(
         [...disabledByOld].filter((s) => s.startsWith(oldProvider + "/")).map((s) => [s.slice(oldProvider.length + 1), true])
       );
@@ -2323,7 +2325,7 @@ var package_default = {
     typecheck: "tsc --noEmit",
     check: "npm run typecheck && npm test && npm run test:errors && npm run build && npm run test:client && npm run test:host && npm run test:package",
     "test:client": "node --test tests/client.test.mjs",
-    "test:errors": "node --import ./tests/resolve-vendor.mjs --test --experimental-transform-types tests/qoder-errors.test.mjs tests/buddy-errors.test.mjs tests/buddy-system.test.mjs tests/trae-cache.test.mjs tests/trae-context.test.mjs tests/trae-offpeak.test.mjs tests/discount-unified.test.mjs tests/discount-unified-live.test.mjs tests/trae-offpeak-live.test.mjs tests/context-report.test.mjs tests/codearts-directory-auth.test.mjs tests/codearts-credits.test.mjs tests/raccoon-image-bridge.test.mjs tests/loomy-raccoon-credits.test.mjs tests/gemini-signature.test.mjs tests/gemini-sigstore.test.mjs",
+    "test:errors": "node --import ./tests/resolve-vendor.mjs --test --experimental-transform-types tests/qoder-errors.test.mjs tests/qoder-efforts.test.mjs tests/qoder-queue.test.mjs tests/sse-truncation.test.mjs tests/buddy-errors.test.mjs tests/buddy-catalog.test.mjs tests/buddy-system.test.mjs tests/trae-cache.test.mjs tests/trae-context.test.mjs tests/trae-offpeak.test.mjs tests/discount-unified.test.mjs tests/discount-unified-live.test.mjs tests/trae-offpeak-live.test.mjs tests/context-report.test.mjs tests/codearts-directory-auth.test.mjs tests/codearts-credits.test.mjs tests/raccoon-image-bridge.test.mjs tests/loomy-raccoon-credits.test.mjs tests/gemini-signature.test.mjs tests/gemini-sigstore.test.mjs",
     "test:host": "node scripts/verify-host.mjs",
     "pack:local": "node scripts/pack.mjs",
     format: 'prettier --write "src/**/*.ts" "src/drivers/*.js" "tests/*" "scripts/*.mjs"',
@@ -2363,7 +2365,7 @@ var package_default = {
   },
   dependencies: {
     jose: "6.1.3",
-    undici: "8.11.2",
+    undici: "8.12.2",
     yaml: "2.8.1"
   },
   devDependencies: {
@@ -2645,6 +2647,113 @@ function extendedTierLabel(model, extendedEnabled) {
   const tier = contextTier(model);
   if (tier?.extended === void 0) return void 0;
   return tokenText(tier.extended);
+}
+
+// src/core/declared-version.ts
+var catalogVersionKey = (provider) => "catalog-version:" + provider;
+var catalogVersionProbeAtKey = (provider) => "catalog-version-probe-at:" + provider;
+var effectiveVersion = (state) => state.adopted?.version ?? state.baseline;
+function ladderCandidates(current) {
+  const parts = current.split(".");
+  if (parts.length !== 3 || parts.some((p) => !/^\d+$/.test(p))) return [];
+  const [x, y, z] = parts.map(Number);
+  return [
+    `${x}.${y}.${z + 1}`,
+    `${x}.${y}.${z + 2}`,
+    `${x}.${y + 1}.0`,
+    `${x}.${y + 2}.0`,
+    `${x}.${y + 3}.0`,
+    `${x + 1}.0.0`
+  ];
+}
+async function loadDeclaredVersion(store, provider, baseline) {
+  const saved = await store.call(
+    "get",
+    catalogVersionKey(provider)
+  );
+  if (saved && typeof saved === "object" && saved.baseline === baseline && (!saved.adopted || typeof saved.adopted.version === "string"))
+    return {
+      baseline,
+      ...saved.adopted ? { adopted: saved.adopted } : {},
+      rejected: Array.isArray(saved.rejected) ? saved.rejected : []
+    };
+  return { baseline, rejected: [] };
+}
+async function saveDeclaredVersion(store, provider, state) {
+  await store.call("set", catalogVersionKey(provider), state);
+}
+async function runVersionProbe(options, now = Date.now()) {
+  const { state, currentIds, fetchCandidate } = options;
+  const from = effectiveVersion(state);
+  const rejectedVersions = new Set(state.rejected.map((r) => r.version));
+  const candidates = ladderCandidates(from).filter(
+    (v) => !rejectedVersions.has(v)
+  );
+  const hardRejected = [];
+  if (candidates.length === 0) return { hardRejected, checked: 0 };
+  const outcomes = await Promise.all(
+    candidates.map(async (version) => ({
+      version,
+      result: await fetchCandidate(version)
+    }))
+  );
+  const valid = [];
+  for (const { version, result } of outcomes) {
+    if (!result.ok) {
+      if (!result.transient)
+        hardRejected.push({ version, at: now, reason: result.reason });
+      continue;
+    }
+    const missing = currentIds.filter((id) => !result.ids.includes(id));
+    if (missing.length > 0) {
+      hardRejected.push({
+        version,
+        at: now,
+        reason: "\u76EE\u5F55\u7F3A\u5C11\u65E2\u6709\u6A21\u578B\uFF1A" + missing.join("\u3001")
+      });
+      continue;
+    }
+    valid.push({ version, ids: result.ids });
+  }
+  if (valid.length === 0) return { hardRejected, checked: candidates.length };
+  let maxIds = valid[0].ids;
+  for (const v of valid) if (v.ids.length > maxIds.length) maxIds = v.ids;
+  if (maxIds.length <= currentIds.length)
+    return { hardRejected, checked: candidates.length };
+  const lowest = valid.find(
+    (v) => v.ids.length === maxIds.length && maxIds.every((id) => v.ids.includes(id))
+  );
+  if (!lowest) return { hardRejected, checked: candidates.length };
+  return {
+    adopted: { version: lowest.version, from, added: maxIds.length - currentIds.length },
+    hardRejected,
+    checked: candidates.length
+  };
+}
+function applyProbeOutcome(state, outcome, now = Date.now()) {
+  const rejected = [
+    ...state.rejected,
+    ...outcome.hardRejected.map((r) => ({ ...r, at: r.at || now }))
+  ].slice(-50);
+  if (!outcome.adopted) return { ...state, rejected };
+  return {
+    ...state,
+    rejected,
+    adopted: {
+      version: outcome.adopted.version,
+      adoptedAt: now,
+      from: outcome.adopted.from
+    }
+  };
+}
+function rollbackAdoption(state) {
+  return state.adopted ? { ...state, adopted: void 0 } : state;
+}
+function probeIntervalMs(env = process.env) {
+  const raw = env.CHANNEL_HUB_VERSION_PROBE_MIN_MS;
+  if (raw === void 0 || raw === "") return 24 * 60 * 60 * 1e3;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : 24 * 60 * 60 * 1e3;
 }
 
 // src/core/promotion.ts
@@ -4446,11 +4555,13 @@ function parseModelInfo(m, seen) {
   const maxTokens = positiveInt(
     m["max_tokens"] ?? m["maxTokens"] ?? m["max_output_tokens"] ?? m["maxOutputTokens"]
   );
+  const supportsImages = m["supports_images"] === true;
   return {
     id,
     name: name2,
     ...contextWindow === void 0 ? {} : { contextWindow },
-    ...maxTokens === void 0 ? {} : { maxTokens }
+    ...maxTokens === void 0 ? {} : { maxTokens },
+    ...supportsImages ? { supportsImages: true } : {}
   };
 }
 function positiveInt(value) {
@@ -4459,6 +4570,13 @@ function positiveInt(value) {
 }
 function isVisualModelId(id) {
   return /-VL-/i.test(id) || /-VL$/i.test(id);
+}
+var CODEARTS_IMAGE_CAPABLE_OVERRIDES = new Set([
+  "deepseek-v4.1-flash",
+  "deepseek-v4.1-flash-1017"
+].map((id) => id.toLowerCase()));
+function isCodeArtsImageCapable(id, model) {
+  return CODEARTS_IMAGE_CAPABLE_OVERRIDES.has(id.toLowerCase()) || model?.supportsImages === true;
 }
 function extractJsonArray(text3, path) {
   try {
@@ -5388,7 +5506,7 @@ function normalizeToolArguments(raw) {
   try {
     parsed = JSON.parse(trimmed);
   } catch {
-    return "{}";
+    return isTruncatedArguments(trimmed) ? "{}" : trimmed;
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return "{}";
   return trimmed;
@@ -5400,8 +5518,20 @@ function isTruncatedArguments(raw) {
     JSON.parse(trimmed);
     return false;
   } catch {
-    return true;
   }
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (const ch of trimmed) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') inString = true;
+    else if (ch === "{" || ch === "[") depth += 1;
+    else if (ch === "}" || ch === "]") depth -= 1;
+  }
+  return inString || depth !== 0;
 }
 var REASONING_LOOP_CODE = "REASONING_LOOP";
 function resolveSliceChars(raw) {
@@ -6115,7 +6245,15 @@ var CodeArtsAdapter = class extends LlmAdapter {
     const visible = this.listAllModels();
     const disabled = this.options.accountPool?.disabledModelsFor(PROVIDER);
     const listed = disabled === void 0 || disabled.size === 0 ? visible : visible.filter((m) => !disabled.has(m.id));
-    return listed.map((m) => ({ provider: PROVIDER, id: m.id, name: m.name, inputModalities: ["text"] }));
+    return listed.map((m) => {
+      const remote = this.remoteModels?.find((entry) => entry.id === m.id);
+      return {
+        provider: PROVIDER,
+        id: m.id,
+        name: m.name,
+        inputModalities: isCodeArtsImageCapable(m.id, remote) ? ["text", "image"] : ["text"]
+      };
+    });
   }
   async resolveModel(provider, model, _signal) {
     await this.ensureRemoteModels();
@@ -6124,6 +6262,7 @@ var CodeArtsAdapter = class extends LlmAdapter {
     const contextWindow = remoteModel?.contextWindow ?? CONTEXT_WINDOWS.get(model);
     const resolved = { provider, id: model, name: name2 };
     if (contextWindow !== void 0 && contextWindow > 0) resolved.context = { contextWindow };
+    resolved.inputModalities = isCodeArtsImageCapable(model, remoteModel) ? ["text", "image"] : ["text"];
     resolved.reasoning = {
       efforts: [
         { id: ReasoningEffortId("on"), name: "\u5F00\u542F" },
@@ -6135,7 +6274,8 @@ var CodeArtsAdapter = class extends LlmAdapter {
   }
   async prepareCall(provider, model, signal) {
     return {
-      model: { ...await this.resolveModel(provider, model, signal), inputModalities: ["text"] },
+      // 模态由 `resolveModel` 统一声明（见其内注释），这里不再覆盖。
+      model: await this.resolveModel(provider, model, signal),
       stream: (options) => this.stream(options)
     };
   }
@@ -7213,7 +7353,8 @@ function isChatModel(id, meta) {
   const maxOutput = meta?.maxOutputTokens;
   if (typeof maxOutput === "number" && maxOutput > 0 && maxOutput <= 256) return false;
   const tags = meta?.tags;
-  if (Array.isArray(tags) && tags.some((tag) => tag === "text-to-image")) return false;
+  if (Array.isArray(tags) && tags.some((tag) => typeof tag === "string" && /-to-(?:image|video)$/.test(tag))) return false;
+  if (typeof meta?.videoGeneration === "object" && meta.videoGeneration !== null) return false;
   return true;
 }
 function parseModelMeta(record) {
@@ -9966,6 +10107,17 @@ function parseQoderRemoteModels(body, scene = QODER_CATALOG_SCENE) {
   return models;
 }
 
+// src/drivers/qoder-catalog.ts
+function parseQoderCatalogModels(raw) {
+  const merged = /* @__PURE__ */ new Map();
+  for (const scene of ["chat", "app"]) {
+    const models = parseQoderRemoteModels(raw, scene);
+    if (!models) continue;
+    for (const model of models) if (!merged.has(model.id)) merged.set(model.id, model);
+  }
+  return merged.size > 0 ? [...merged.values()] : void 0;
+}
+
 // vendor/ofm/src/qoder-auth.ts
 import { Service as Service3 } from "@deepseek-ai/cordis";
 import { credentialRef as credentialRef4 } from "@deepseek-ai/dsh-credentials";
@@ -11373,6 +11525,36 @@ function unwrapQoderEnvelopeStream(response, label) {
   });
 }
 
+// vendor/ofm/src/reasoning-ladder.ts
+var REASONING_EFFORT_RANK = Object.freeze({
+  off: 0,
+  none: 0,
+  minimal: 1,
+  light: 2,
+  low: 3,
+  medium: 4,
+  high: 5,
+  // 「开启思考」没有强度语义 —— 与 high 同序，使它在规范名里反查成 `high`。
+  on: 5,
+  extra_high: 6,
+  xhigh: 7,
+  max: 8,
+  ultra: 9
+});
+var CANONICAL_REASONING_EFFORTS = Object.freeze([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra"
+]);
+function reasoningRankOf(effort) {
+  return Object.prototype.hasOwnProperty.call(REASONING_EFFORT_RANK, effort) ? REASONING_EFFORT_RANK[effort] : void 0;
+}
+
 // vendor/ofm/src/openai-compat.ts
 import { LlmError as LlmError5, ToolCallId as ToolCallId3 } from "@deepseek-ai/dsh-llm";
 function contentToText3(content) {
@@ -11786,6 +11968,8 @@ async function* consumeOpenAiSse(response, options, config) {
       }
     }
   } finally {
+    await reader.cancel().catch(() => {
+    });
     reader.releaseLock();
   }
   let blockCount = 0;
@@ -11899,10 +12083,14 @@ var QODER_EFFORT_NAMES = {
   xhigh: "\u6781\u9AD8",
   max: "\u6700\u5927"
 };
+var UNKNOWN_EFFORT_RANK = 100;
+function sortEffortsByStrength(efforts) {
+  return efforts.map((id, index) => ({ id, index, rank: reasoningRankOf(id) ?? UNKNOWN_EFFORT_RANK })).sort((a, b) => a.rank - b.rank || a.index - b.index).map(({ id }) => id);
+}
 function qoderEffortsFor(model) {
   const efforts = [...model.efforts ?? []];
   if (model.supportsDisable === true && !efforts.includes("none")) efforts.push("none");
-  return efforts;
+  return sortEffortsByStrength(efforts);
 }
 function resolveQueueTimeoutMs() {
   const raw = process.env.DSH_QODER_QUEUE_TIMEOUT_MS;
@@ -12279,12 +12467,14 @@ var QoderAdapter = class extends LlmAdapter3 {
       );
       const iterator = inner[Symbol.asyncIterator]();
       let queued = false;
+      let emittedAnyChunk = false;
       for (; ; ) {
         let step;
         try {
           step = await iterator.next();
         } catch (error) {
           if (error instanceof ModelQueuedError) {
+            if (emittedAnyChunk) throw error;
             await this.waitForQueue(
               queueInfoOf(error),
               ++queueAttempts,
@@ -12308,6 +12498,7 @@ var QoderAdapter = class extends LlmAdapter3 {
         }
         if (step.done === true) break;
         yield step.value;
+        emittedAnyChunk = true;
       }
       if (queued) continue;
       return;
@@ -12365,9 +12556,14 @@ var QoderAdapter = class extends LlmAdapter3 {
       throw new LlmError6("qoder: \u6392\u961F\u7B49\u5F85\u671F\u95F4\u8BF7\u6C42\u5DF2\u53D6\u6D88", "QUEUE");
     }
     const waitMs = qoderQueueDelayMs(queueInfo);
-    await this.sleep(waitMs ?? 1e3, options.signal);
+    const requestedWaitMs = Math.max(100, waitMs ?? 1e3);
+    const remainingMs = Math.max(0, deadline - Date.now());
+    await this.sleep(Math.min(requestedWaitMs, remainingMs), options.signal);
     if (isAborted2(options.signal)) {
       throw new LlmError6("qoder: \u6392\u961F\u7B49\u5F85\u671F\u95F4\u8BF7\u6C42\u5DF2\u53D6\u6D88", "QUEUE");
+    }
+    if (Date.now() >= deadline) {
+      throw new LlmError6("qoder: \u6392\u961F\u7B49\u5F85\u8D85\u65F6", "QUEUE");
     }
   }
   /**
@@ -14245,38 +14441,6 @@ var TraeAuth = class _TraeAuth extends Service4 {
 // vendor/ofm/src/trae-adapter.ts
 import { LlmAdapter as LlmAdapter4, LlmError as LlmError7, ReasoningEffortId as ReasoningEffortId4 } from "@deepseek-ai/dsh-llm";
 import { ToolCallId as ToolCallId4 } from "@deepseek-ai/dsh-llm";
-
-// vendor/ofm/src/reasoning-ladder.ts
-var REASONING_EFFORT_RANK = Object.freeze({
-  off: 0,
-  none: 0,
-  minimal: 1,
-  light: 2,
-  low: 3,
-  medium: 4,
-  high: 5,
-  // 「开启思考」没有强度语义 —— 与 high 同序，使它在规范名里反查成 `high`。
-  on: 5,
-  extra_high: 6,
-  xhigh: 7,
-  max: 8,
-  ultra: 9
-});
-var CANONICAL_REASONING_EFFORTS = Object.freeze([
-  "none",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-  "ultra"
-]);
-function reasoningRankOf(effort) {
-  return Object.prototype.hasOwnProperty.call(REASONING_EFFORT_RANK, effort) ? REASONING_EFFORT_RANK[effort] : void 0;
-}
-
-// vendor/ofm/src/trae-adapter.ts
 var TRAE_CACHE_READ_FIELDS = [
   "cache_read_input_tokens",
   "cacheReadInputTokens",
@@ -21233,7 +21397,7 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
 6HRkPJ7S236FZz73In/KVuLnwI8JJ2CbuJap8kvheCCZpmAWpb/cPx/3Vr/J6I17
 XcW+ML9FoCI6AOvOzwIDAQAB
 -----END PUBLIC KEY-----`;
-var COSY_VERSION2 = "1.1.38";
+var COSY_VERSION2 = "1.1.79";
 var COSY_CLIENT_TYPE = "5";
 var COSY_DATA_POLICY = "disagree";
 var CUSTOM_ALPHABET = "_doRTgHZBKcGVjlvpC,@aFSx#DPuNJme&i*MzLOEn)sUrthbf%Y^w.(kIQyXqWA!";
@@ -21280,7 +21444,8 @@ function machineOs() {
   if (process.platform === "darwin") return process.arch === "arm64" ? "aarch64_darwin" : "x86_64_darwin";
   return process.arch === "arm64" ? "aarch64_linux" : "x86_64_linux";
 }
-function buildCosyHeaders(body, requestUrl, creds) {
+function buildCosyHeaders(body, requestUrl, creds, overrides = {}) {
+  const cosyVersion = typeof overrides.cosyVersion === "string" && overrides.cosyVersion.length > 0 ? overrides.cosyVersion : COSY_VERSION2;
   if (typeof creds?.userID !== "string" || creds.userID.length === 0) throw new Error("cosy: userID \u4E3A\u7A7A");
   const authToken = typeof creds?.authToken === "string" && creds.authToken !== "" ? creds.authToken : creds?.jobToken;
   if (typeof authToken !== "string" || authToken.length === 0) throw new Error("cosy: authToken \u4E3A\u7A7A");
@@ -21307,7 +21472,7 @@ function buildCosyHeaders(body, requestUrl, creds) {
     version: "v1",
     requestId: randomUUID7(),
     info: infoB64,
-    cosyVersion: COSY_VERSION2,
+    cosyVersion,
     ideVersion: ""
   })).toString("base64");
   const bodyBytes = body === void 0 || body === null ? Buffer.alloc(0) : Buffer.isBuffer(body) ? body : Buffer.from(body);
@@ -21318,7 +21483,7 @@ function buildCosyHeaders(body, requestUrl, creds) {
     "Cosy-Key": cosyKey,
     "Cosy-User": creds.userID,
     "Cosy-Date": ts,
-    "Cosy-Version": COSY_VERSION2,
+    "Cosy-Version": cosyVersion,
     "Cosy-Machineid": machineId,
     "Cosy-Machinetoken": machineId,
     "Cosy-Machinetype": "5",
@@ -22644,7 +22809,8 @@ var specs = [
   // 只是一个渠道，不能拆成两个条目重复登录。
   ["buddy", "CodeBuddy / WorkBuddy CN", BuddyAuth, BuddyAdapter, CODEBUDDY],
   ["workbuddy", "WorkBuddy \u56FD\u9645\u7248", BuddyAuth, BuddyAdapter, WORKBUDDY],
-  ["qoder", "Qoder \u56FD\u9645\u7248", QoderAuth, QoderAdapter, QODER],
+  // Qoder 只保留中国版渠道；国际版（旧 `qoder`）已移除，历史账号走
+  // 孤儿账号机制（`accounts.orphans` / `accounts.delete`），不会静默删除。
   ["qodercn", "Qoder CN", QoderAuth, QoderAdapter, QODER_CN],
   // 旧 SOLO 已并入 Trae CN IDE，只保留一个 Trae 渠道；登录仍走 OFM 的
   // TraeAuth/ExchangeToken，仅把客户端与版本身份换成现役 CN IDE。
@@ -22667,6 +22833,7 @@ var specs = [
   ["raccoon", "Raccoon", RaccoonAuth, RaccoonAdapter, RACCOON],
   ["gemini", "Gemini", GeminiAuth, GeminiAdapter, GEMINI]
 ];
+var CATALOG_VERSION_PROVIDERS = /* @__PURE__ */ new Set(["qodercn"]);
 var parse = (value) => {
   try {
     return JSON.parse(value);
@@ -22762,6 +22929,10 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         fetchImpl: directoryFetch
       });
       const renewalJobs = /* @__PURE__ */ new Map();
+      let versionState = CATALOG_VERSION_PROVIDERS.has(id) ? await loadDeclaredVersion(store, id, COSY_VERSION2) : void 0;
+      let versionNote;
+      let versionNoteAt = 0;
+      let versionProbe;
       const renewAccount = async (a) => {
         const existing = renewalJobs.get(a.id);
         if (existing) return existing;
@@ -22890,11 +23061,57 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         }
       };
       let adapter = new Adapter(options);
+      const fetchQoderCatalog = async (c, version) => {
+        const url = product.encryptedInferBase + "/algo/api/v2/model/list?Encode=1";
+        let response;
+        try {
+          response = await channelFetch(url, {
+            headers: buildCosyHeaders(
+              null,
+              url,
+              {
+                userID: c.uid,
+                authToken: c.security_oauth_token ?? c.access_token,
+                machineID: c.machine_id
+              },
+              version === void 0 ? void 0 : { cosyVersion: version }
+            ),
+            signal: AbortSignal.timeout(3e4)
+          });
+        } catch (e) {
+          throw Object.assign(Error("\u76EE\u5F55\u8BF7\u6C42\u5931\u8D25\uFF1A" + redact(e)), {
+            probeKind: "transient"
+          });
+        }
+        if (!response.ok) {
+          let detail = "";
+          try {
+            detail = await response.text();
+          } catch {
+            detail = "";
+          }
+          throw Error(describeHttpFailure("\u76EE\u5F55", response.status, detail));
+        }
+        let raw;
+        try {
+          raw = await response.json();
+        } catch {
+          throw Object.assign(Error("\u76EE\u5F55\u4E0D\u662F\u6709\u6548 JSON"), {
+            probeKind: "shape"
+          });
+        }
+        const parsed = parseQoderCatalogModels(raw);
+        if (!parsed)
+          throw Object.assign(Error("\u76EE\u5F55\u7F3A\u5C11 chat/app \u573A\u666F"), {
+            probeKind: "shape"
+          });
+        return parsed;
+      };
       const discover = async (account) => directoryContext.run({}, async () => {
         const p = scopedPool(account), c = await read(account);
         if (!c) throw Error("\u8D26\u53F7\u51ED\u636E\u4E0D\u53EF\u8BFB\u53D6");
         let models;
-        if (id === "qoder" || id === "qodercn") {
+        if (id === "qodercn") {
           await syncQoderAccountName({
             fetcher: channelFetch,
             account,
@@ -22904,28 +23121,31 @@ async function createDrivers(ctx, { catalog, observer, store }) {
             readCredential: read,
             updateAccount: (accountId, patch) => pool.updateAccount(accountId, patch)
           }).catch((error) => ctx.logger.warn("Qoder \u8D26\u53F7\u540D\u79F0\u66F4\u65B0\u5931\u8D25\uFF1A" + redact(error)));
-          const url = product.encryptedInferBase + "/algo/api/v2/model/list?Encode=1";
-          const response = await channelFetch(url, {
-            headers: buildCosyHeaders(null, url, {
-              userID: c.uid,
-              authToken: c.security_oauth_token ?? c.access_token,
-              machineID: c.machine_id
-            }),
-            signal: AbortSignal.timeout(3e4)
-          });
-          if (!response.ok) {
-            let detail = "";
+          try {
+            models = await fetchQoderCatalog(c, effectiveVersion(versionState));
+          } catch (e) {
+            if (!versionState?.adopted) throw e;
+            const rolled = versionState.adopted.version;
             try {
-              detail = await response.text();
+              models = await fetchQoderCatalog(c, versionState.baseline);
             } catch {
-              detail = "";
+              throw e;
             }
-            throw Error(describeHttpFailure("\u76EE\u5F55", response.status, detail));
+            if (e?.probeKind === "shape") {
+              if (versionState.adopted?.version === rolled) {
+                versionState = rollbackAdoption(versionState);
+                await saveDeclaredVersion(store, id, versionState).catch(() => {
+                });
+                versionNote = name2 + " \u76EE\u5F55\u7248\u672C " + rolled + " \u5DF2\u5931\u6548\uFF0C\u5DF2\u56DE\u6EDA\u5230 " + versionState.baseline;
+                versionNoteAt = Date.now();
+                ctx.logger.warn(versionNote + "\uFF1A" + redact(e));
+              }
+            } else {
+              ctx.logger.warn(
+                name2 + " \u76EE\u5F55\u7248\u672C " + rolled + " \u8BF7\u6C42\u5931\u8D25\uFF08\u77AC\u6001\uFF09\uFF0C\u672C\u8F6E\u4EE5\u57FA\u7EBF " + versionState.baseline + " \u515C\u5E95\uFF1A" + redact(e)
+              );
+            }
           }
-          const raw = await response.json();
-          if (!Array.isArray(raw.chat)) throw Error("\u76EE\u5F55\u7F3A\u5C11 chat \u6570\u7EC4");
-          models = parseQoderRemoteModels(raw);
-          if (!models) throw Error("\u65E0\u6CD5\u8BC6\u522B Qoder \u76EE\u5F55");
         } else if (id === "codearts") models = await auth.refreshModels(p);
         else if (id === "loomy") {
           const res = await channelFetch(LOOMY.apiBase + "/models", {
@@ -22971,6 +23191,61 @@ async function createDrivers(ctx, { catalog, observer, store }) {
           return promotion === void 0 ? model : { ...model, promotion };
         });
       });
+      const maybeProbeVersion = async (accounts, snapshots) => {
+        if (!versionState || versionProbe) return versionProbe;
+        versionProbe = (async () => {
+          try {
+            const usable = snapshots.filter(
+              (s) => !s?.error && Array.isArray(s.models)
+            );
+            const account = accounts.find((a) => a.enabled);
+            if (usable.length === 0 || !account) return void 0;
+            const c = await read(account);
+            if (!c) return void 0;
+            const now = Date.now();
+            const lastAt = await store.call(
+              "get",
+              catalogVersionProbeAtKey(id)
+            );
+            if (typeof lastAt === "number" && now - lastAt < probeIntervalMs())
+              return void 0;
+            await store.call("set", catalogVersionProbeAtKey(id), now);
+            const currentIds = [
+              ...new Set(usable.flatMap((s) => s.models.map((m) => m.id)))
+            ];
+            const outcome = await runVersionProbe({
+              state: versionState,
+              currentIds,
+              fetchCandidate: async (version) => {
+                try {
+                  const candidate = await fetchQoderCatalog(c, version);
+                  return { ok: true, ids: candidate.map((m) => m.id) };
+                } catch (e) {
+                  return { ok: false, transient: true, reason: redact(e) };
+                }
+              }
+            });
+            const next = applyProbeOutcome(versionState, outcome);
+            const changed = next.adopted?.version !== versionState.adopted?.version || next.rejected.length !== versionState.rejected.length;
+            versionState = next;
+            if (changed)
+              await saveDeclaredVersion(store, id, versionState).catch(() => {
+              });
+            if (outcome.adopted) {
+              versionNote = name2 + " \u76EE\u5F55\u7248\u672C " + outcome.adopted.from + "\u2192" + outcome.adopted.version + "\uFF0C\u65B0\u589E " + outcome.adopted.added + " \u4E2A\u6A21\u578B";
+              versionNoteAt = Date.now();
+              ctx.logger.warn(versionNote);
+            }
+            return outcome;
+          } catch (e) {
+            ctx.logger.warn("\u76EE\u5F55\u7248\u672C\u63A2\u6D4B\u5931\u8D25\uFF08\u5DF2\u5FFD\u7565\uFF09\uFF1A" + redact(e));
+            return void 0;
+          } finally {
+            versionProbe = void 0;
+          }
+        })();
+        return versionProbe;
+      };
       const hydrate = async () => {
         const requested = await selection.get(id);
         const snapshots = await Promise.all(
@@ -22985,12 +23260,23 @@ async function createDrivers(ctx, { catalog, observer, store }) {
       };
       const reload = async () => {
         const accounts = pool.listAccountsByProvider(id);
-        const results = await Promise.all(
+        let results = await Promise.all(
           accounts.map(
             (a) => catalog.refresh(id + ":" + a.id, () => discover(a))
           )
         );
         await hydrate();
+        if (versionState && results.some((s) => !s?.error)) {
+          const outcome = await maybeProbeVersion(accounts, results);
+          if (outcome?.adopted) {
+            results = await Promise.all(
+              accounts.map(
+                (a) => catalog.refresh(id + ":" + a.id, () => discover(a))
+              )
+            );
+            await hydrate();
+          }
+        }
         try {
           ctx.emit("llm/adapters-updated");
         } catch (e) {
@@ -23078,7 +23364,7 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         }
         if (id === "buddy" || id === "workbuddy")
           return fetchCreditBalanceDetailed(c, product, channelFetch);
-        if (id.startsWith("qoder"))
+        if (id === "qodercn")
           return fetchQoderCreditBalanceDetailed(c, product, channelFetch);
         if (id.startsWith("trae"))
           return fetchTraeCreditBalanceDetailed(c, product, channelFetch);
@@ -23093,7 +23379,6 @@ async function createDrivers(ctx, { catalog, observer, store }) {
       const claim = [
         "codearts",
         "buddy",
-        "qoder",
         "qodercn",
         "trae",
         "loomy",
@@ -23103,7 +23388,7 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         if (!c) throw Error("\u51ED\u636E\u4E0D\u53EF\u8BFB\u53D6");
         if (id === "codearts") return claimCodeArtsDailyCheckin(c, channelFetch);
         if (id === "buddy") return claimDailyCheckin(c, product, channelFetch);
-        if (id.startsWith("qoder"))
+        if (id === "qodercn")
           return claimQoderDailyCheckin(c, product, channelFetch);
         if (id.startsWith("trae"))
           return claimTraeDailyCheckin(
@@ -23131,6 +23416,26 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         claim,
         renew: renewAccount,
         discover,
+        /**
+         * 目录声明版本（仅启用策略的渠道非 undefined；`channels.list` 观测用）。
+         * 读的是闭包里的可变状态 —— 采纳/回滚后无需重建驱动即反映当前值。
+         */
+        declaredVersion: versionState ? () => ({
+          version: effectiveVersion(versionState),
+          baseline: versionState.baseline,
+          adopted: versionState.adopted !== void 0,
+          ...versionState.adopted ? { adoptedAt: versionState.adopted.adoptedAt } : {}
+        }) : void 0,
+        /**
+         * 消费版本事件留痕（采纳/回滚各一条，`models.refresh` 全量聚合上报）。
+         * ⚠️ 带时效：单渠道路径不消费它，超过 10 分钟的滞留留痕不再上报，
+         * 避免下一次全量刷新吐出一条过期消息。
+         */
+        consumeVersionNote: versionState ? () => {
+          const note = versionNote;
+          versionNote = void 0;
+          return note !== void 0 && Date.now() - versionNoteAt < 6e5 ? note : void 0;
+        } : void 0,
         /**
          * 该渠道是否支持「大窗口档」（目前只有 Trae 的 Max 1M 档）。
          *
@@ -23330,10 +23635,12 @@ function installSessionModelIsolation(ctx) {
       const { reasoningEffort: _effort, ...rest } = result;
       return { ...rest, ...assembled };
     }, { prepend: true });
-    ctx.effect(() => () => {
+    const cleanup = () => {
       offAssembly();
       offRequest();
-    });
+    };
+    if (typeof agent.ctx.effect === "function") agent.ctx.effect(() => cleanup);
+    else ctx.effect(() => cleanup);
   });
 }
 
@@ -23462,6 +23769,12 @@ async function apply(ctx) {
               enabled: d.extendedContext.enabled()
             }
           } : {},
+          /**
+           * 目录声明版本（仅启用自动更新策略的渠道下发，如 qodercn）。
+           * 界面据此展示「目录版本 x.y.z」并标注是否为自动采纳 ——
+           * 身份被探测改变必须可见，不能只留在日志里。
+           */
+          ...d.declaredVersion ? { catalogVersion: d.declaredVersion() } : {},
           accounts: await Promise.all(
             accounts.filter((a) => a.provider === d.id).map(async (a) => {
               const balance = await store.call("get", "balance:" + a.id);
@@ -23632,6 +23945,11 @@ async function apply(ctx) {
         });
         if (failures.length === targets.length && targets.length > 0)
           throw Error("\u5168\u90E8\u6E20\u9053\u76EE\u5F55\u66F4\u65B0\u5931\u8D25\uFF1A" + failures.join("\uFF1B"));
+        const versionNotes = [];
+        targets.forEach((d2) => {
+          const note = d2.consumeVersionNote?.();
+          if (note) versionNotes.push(note);
+        });
         ctx.emit("llm/adapters-updated");
         return {
           refreshed,
@@ -23639,6 +23957,7 @@ async function apply(ctx) {
           ...Object.keys(partial).length > 0 ? { partial } : {},
           failures,
           skipped,
+          ...versionNotes.length > 0 ? { versionNotes } : {},
           total: targets.length
         };
       }

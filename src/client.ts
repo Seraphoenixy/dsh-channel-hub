@@ -81,7 +81,6 @@ window.__ModuleLoader__.load({
       codearts: "#c05a5a",
       buddy: "#2f7cf6",
       workbuddy: "#2fa58a",
-      qoder: "#6b6ef5",
       qodercn: "#4c8fd9",
       trae: "#2fa58a",
       loomy: "#d35d8a",
@@ -439,6 +438,11 @@ window.__ModuleLoader__.load({
               result?.partial && typeof result.partial === "object"
                 ? result.partial
                 : {};
+            // 目录声明版本的事件（自动采纳 / 失效回滚）：身份变了必须让用户
+            // 看见，不能只留在日志里。
+            const versionNotes: string[] = Array.isArray(result?.versionNotes)
+              ? result.versionNotes
+              : [];
             const parts = [
               "已更新 " + refreshed + "/" + total + " 个渠道" +
                 (refreshedAccounts > 0 && refreshedAccounts !== refreshed
@@ -455,6 +459,7 @@ window.__ModuleLoader__.load({
                   )
                   .join("、"),
               );
+            if (versionNotes.length) parts.push(versionNotes.join("；"));
             if (skipped.length)
               parts.push("跳过 " + skipped.length + " 个（没有账号）");
             if (failures.length) {
@@ -1775,6 +1780,26 @@ window.__ModuleLoader__.load({
                             ? "目录 · " + ago(latest)
                             : "目录未更新",
                       ),
+                      /**
+                       * 目录声明版本（仅启用自动更新策略的渠道下发，如
+                       * Qoder CN）。⚠️ 采纳与基线要区分展示：自动改身份必须
+                       * 可见、可追溯，悬停给出采纳时间与回滚终点；基线如实写
+                       * 「内置」。
+                       */
+                      c.catalogVersion &&
+                        h(
+                          "span",
+                          {
+                            title: c.catalogVersion.adopted
+                              ? "自动采纳于 " +
+                                date(c.catalogVersion.adoptedAt) +
+                                "（失效自动回滚到 " +
+                                c.catalogVersion.baseline +
+                                "）"
+                              : "内置基线版本",
+                          },
+                          "目录版本 " + c.catalogVersion.version,
+                        ),
                       /**
                        * 大窗口档开关（目前只有 Trae 的 Max 1M）。
                        *

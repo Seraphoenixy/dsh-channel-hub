@@ -10,7 +10,7 @@ import { AccountPool, providerCatalogVisible } from './account-pool.js'
 import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { settingsNamespaceFor } from './settings-compat.js'
 import { nextUtc8DayStartMs } from './model-queue.js'
-import { isCodeArtsBenefitModel, isCodeArtsAuthFailure, isCodeArtsTransientFailure, isVisualModelId } from './models.js'
+import { isCodeArtsBenefitModel, isCodeArtsAuthFailure, isCodeArtsImageCapable, isCodeArtsTransientFailure, isVisualModelId } from './models.js'
 import { normalizeHarnessMessages } from './message-shape.js'
 import { signRequestHuawei } from './sign.js'
 import { createBlankReasoningSuppressor, createReasoningLoopDetector, hasUsableToolName, isReasoningLoopGuardEnabled, isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, reasoningLoopFailure, resolveEmptyResponseReason, resolveToolPairing, stripCourseLeakFromHistoryContent, stripCourseLeakIfEnabled } from './sse.js'
@@ -1063,7 +1063,22 @@ export class CodeArtsAdapter extends LlmAdapter {
     const listed = disabled === undefined || disabled.size === 0
       ? visible
       : visible.filter((m) => !disabled.has(m.id))
-    return listed.map((m) => ({ provider: PROVIDER, id: m.id, name: m.name, inputModalities: ['text'] as const }))
+    // 输入模态：**能收图的主模型**（实测覆盖表 ∪ 目录 `supports_images`）声明
+    // `['text','image']`。宿主 `dsh-llm` 以此为唯一开关 —— 不声明 image 的模型，
+    // 图在入库阶段就被换成 `[image omitted…]` 占位文字，请求根本发不出去
+    // （上游实测 `deepseek-v4.1-flash` / `-1017` 目录标 false 却能收图，
+    // 2026-11-05；判据与覆盖表见 `models.ts` 的 `isCodeArtsImageCapable`）。
+    // 其余模型维持 `['text']`：给不能收图的模型声明 image，只会把请求打到
+    // 406 `not multimodal`（实测 `glm-5.3` 对照组）。
+    return listed.map((m) => {
+      const remote = this.remoteModels?.find((entry) => entry.id === m.id)
+      return {
+        provider: PROVIDER,
+        id: m.id,
+        name: m.name,
+        inputModalities: isCodeArtsImageCapable(m.id, remote) ? ['text', 'image'] as const : ['text'] as const,
+      }
+    })
   }
 
   async resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
@@ -1081,6 +1096,10 @@ export class CodeArtsAdapter extends LlmAdapter {
     const contextWindow = remoteModel?.contextWindow ?? CONTEXT_WINDOWS.get(model)
     const resolved: LlmResolvedModelInfo = { provider, id: model, name }
     if (contextWindow !== undefined && contextWindow > 0) resolved.context = { contextWindow }
+    // 输入模态与 `listModels` 同源（`isCodeArtsImageCapable` 单一判据）：
+    // `prepareCall` 不再硬编码 `['text']` —— 硬覆盖会静默抹平这里的声明，
+    // 让「能收图的主模型」在调用平面重新变回纯文本（与目录平面不一致）。
+    resolved.inputModalities = isCodeArtsImageCapable(model, remoteModel) ? ['text', 'image'] : ['text']
     // ⚠️ **不声明 `defaultMaxTokens`**：本渠道的输出上限由 `stream()` 里
     // `max_tokens: options.maxTokens ?? 65536` 统一决定，那个 65536 有实测依据
     // （131072 会被后端拒成空流）。把目录里的值透传成 DSH 默认值等于绕过
@@ -1106,7 +1125,8 @@ export class CodeArtsAdapter extends LlmAdapter {
     signal?: AbortSignal,
   ): Promise<{ model: LlmResolvedModelInfo; stream: (options: GenerateOptions) => AsyncIterable<StreamChunk> }> {
     return {
-      model: { ...await this.resolveModel(provider, model, signal), inputModalities: ['text'] as const },
+      // 模态由 `resolveModel` 统一声明（见其内注释），这里不再覆盖。
+      model: await this.resolveModel(provider, model, signal),
       stream: (options: GenerateOptions) => this.stream(options),
     }
   }

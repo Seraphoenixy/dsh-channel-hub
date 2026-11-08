@@ -40,10 +40,21 @@ test("CodeBuddy history normalizes to buddy", () => {
 });
 test("existing Qoder session without machine identity requires login", () => {
   assert.equal(
+    convertLegacy("qodercn", {
+      token: "test",
+      uid: "u",
+      refreshToken: "refresh",
+    }),
+    undefined,
+  );
+});
+test("legacy Qoder international sessions are no longer importable", () => {
+  assert.equal(
     convertLegacy("qoder", {
       token: "test",
       uid: "u",
       refreshToken: "refresh",
+      machineId: "existing",
     }),
     undefined,
   );
@@ -117,14 +128,14 @@ test("migration is explicit, repeatable, read-only to sources and does not overw
       accounts: [
         {
           id: "old",
-          provider: "qoder",
+          provider: "qodercn",
           nickname: "Q",
           credentialRef: "OLD",
           enabled: true,
           refreshable: true,
         },
       ],
-      disabledModels: { qoder: { hidden: true } },
+      disabledModels: { qodercn: { hidden: true } },
     }),
   );
   const before = readFileSync(source);
@@ -171,12 +182,12 @@ test("migration is explicit, repeatable, read-only to sources and does not overw
   assert.equal(preview.length, 1);
   assert.equal(accounts.size, 0);
   assert.equal(JSON.stringify(preview).includes("fixture"), false);
-  await service.importAll(new Set(["qoder"]));
+  await service.importAll(new Set(["qodercn"]));
   assert.equal(accounts.size, 1);
   const ref = [...credentials.keys()][0];
   credentials.set(ref, "new-login");
   values.clear();
-  await service.importAll(new Set(["qoder"]));
+  await service.importAll(new Set(["qodercn"]));
   assert.equal(credentials.get(ref), "new-login");
   assert.deepEqual(disabled, new Set(["existing", "hidden"]));
   assert.deepEqual(readFileSync(source), before);

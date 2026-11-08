@@ -185,6 +185,12 @@ export async function apply(ctx: any) {
                 },
               }
             : {}),
+          /**
+           * 目录声明版本（仅启用自动更新策略的渠道下发，如 qodercn）。
+           * 界面据此展示「目录版本 x.y.z」并标注是否为自动采纳 ——
+           * 身份被探测改变必须可见，不能只留在日志里。
+           */
+          ...(d.declaredVersion ? { catalogVersion: d.declaredVersion() } : {}),
           accounts: await Promise.all(
             accounts
               .filter((a: Account) => a.provider === d.id)
@@ -424,6 +430,16 @@ export async function apply(ctx: any) {
         // 全部失败才抛错；部分失败只报告，成功的渠道照常更新。
         if (failures.length === targets.length && targets.length > 0)
           throw Error("全部渠道目录更新失败：" + failures.join("；"));
+        /**
+         * 目录声明版本的事件留痕（采纳/回滚，见 `core/declared-version.ts`）。
+         * ⚠️ 无论渠道本轮成败都消费：回滚留痕恰恰发生在失败的渠道上，
+         * 只在成功分支收集会把回滚吞掉。
+         */
+        const versionNotes: string[] = [];
+        targets.forEach((d: any) => {
+          const note = d.consumeVersionNote?.();
+          if (note) versionNotes.push(note);
+        });
         // ⚠️ 目录快照变了 ⇒ 模型菜单必须重读，否则界面显示新目录、菜单还是旧的。
         ctx.emit("llm/adapters-updated");
         return {
@@ -432,6 +448,7 @@ export async function apply(ctx: any) {
           ...(Object.keys(partial).length > 0 ? { partial } : {}),
           failures,
           skipped,
+          ...(versionNotes.length > 0 ? { versionNotes } : {}),
           total: targets.length,
         };
       }

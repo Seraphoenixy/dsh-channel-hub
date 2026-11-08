@@ -33,10 +33,20 @@ XcW+ML9FoCI6AOvOzwIDAQAB
  * 客户端身份版本号。
  *
  * ⚠️ 这是**硬编码契约**：`Cosy-Version` 落后于 Qoder CLI 当前版本时，服务端会
- * 返回被裁剪过的模型列表（本地实测：CLI 1.1.61 对应 1.1.38 可用）。
+ * 按 `minimal_version` 闸门裁剪模型列表。
+ *
+ * ⚠️ **1.1.38 → 1.1.79（2026-11-08，随上游参考实现抬升）**：官方 IDE 0.5.6 的
+ * `logs/runs/<run>/manifest.json` 自称 `cli_version = 1.1.79-hotfix.18`，取
+ * `1.1.79` 而**不带**预发布后缀 —— semver 预发布**低于**同位正式版，若上游把
+ * 闸门抬到 `1.1.79` 本身，带后缀会静默判不过。参考实现实测（真实凭据）：
+ * `fast` 的闸门是 `{app: 1.1.66, cli: 1.1.70}`，目录在 1.1.70 **封顶**
+ * （1.1.79 / 1.1.80 / 1.2.0 / 9.9.9 与 1.1.70 逐条相同），抬升只多解闸、不改
+ * 其余条目。本插件有动态声明版本探测（`src/core/declared-version.ts`），
+ * 此常量是**未采纳任何探测结果时的基线**（也是采纳失效后的回滚目标）。
+ * 本地真实账号的目录与推理复核单列 `docs/ACCEPTANCE.md`。
  * 随 CLI 升级要复核这里。
  */
-export const COSY_VERSION = "1.1.38";
+export const COSY_VERSION = "1.1.79";
 /** OpenAPI 平面用的是另一条版本线。 */
 export const COSY_OPENAPI_VERSION = "1.0.1";
 /**
@@ -157,8 +167,20 @@ function machineOs() {
  *
  * `body` 必须是**最终要发出去的字节**（即已经过 {@link qoderEncodeBody} 的那份），
  * 因为签名和 `Cosy-Bodyhash` / `Cosy-Bodylength` 都覆盖它。
+ *
+ * `overrides.cosyVersion`（本插件 2026-11-08 追加，记账见 docs/ACCEPTANCE.md）：
+ * 覆盖 `Cosy-Version` 头与签名载荷里的 `cosyVersion`，两处**必须同值** ——
+ * 它们都在同一个 Bearer 载荷与头里，由同一次签名覆盖。用途：目录平面的
+ * 声明版本自动更新（上游按每模型 `minimal_version` 闸门裁剪目录，见
+ * `vendor/ofm/src/qoder-catalog.ts`；探测/采纳/回滚策略见
+ * `src/core/declared-version.ts`）。缺省恒为 {@link COSY_VERSION}，推理平面
+ * （`qoder-wasm.ts` 自带的 1.1.49）不经此处，不受影响。
  */
-export function buildCosyHeaders(body, requestUrl, creds) {
+export function buildCosyHeaders(body, requestUrl, creds, overrides = {}) {
+  const cosyVersion =
+    typeof overrides.cosyVersion === "string" && overrides.cosyVersion.length > 0
+      ? overrides.cosyVersion
+      : COSY_VERSION;
   if (typeof creds?.userID !== "string" || creds.userID.length === 0) throw new Error("cosy: userID 为空");
   /**
    * [dsh-connect 2026-09-24 修正] token 的字段名有两套：
@@ -189,7 +211,7 @@ export function buildCosyHeaders(body, requestUrl, creds) {
     version: "v1",
     requestId: randomUUID(),
     info: infoB64,
-    cosyVersion: COSY_VERSION,
+    cosyVersion,
     ideVersion: "",
   })).toString("base64");
 
@@ -210,7 +232,7 @@ export function buildCosyHeaders(body, requestUrl, creds) {
     "Cosy-Key": cosyKey,
     "Cosy-User": creds.userID,
     "Cosy-Date": ts,
-    "Cosy-Version": COSY_VERSION,
+    "Cosy-Version": cosyVersion,
     "Cosy-Machineid": machineId,
     "Cosy-Machinetoken": machineId,
     "Cosy-Machinetype": "5",

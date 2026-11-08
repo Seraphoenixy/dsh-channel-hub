@@ -897,7 +897,17 @@ function isChatModel(id: string, meta: Record<string, unknown> | undefined): boo
   const maxOutput = meta?.maxOutputTokens
   if (typeof maxOutput === 'number' && maxOutput > 0 && maxOutput <= 256) return false
   const tags = meta?.tags
-  if (Array.isArray(tags) && tags.some((tag) => tag === 'text-to-image')) return false
+  // 模态转换（生成类任务）模型（本插件 2026-11-08 追加，记账见
+  // docs/ACCEPTANCE.md）：tags 的 `*-to-image` / `*-to-video` 家族是任务标记，
+  // 实测覆盖 text-to-image（混元文生图 hunyuan-image-alpha）、image-to-image
+  // （混元图像编辑 hunyuan-image-alpha-edit）、text-to-video / image-to-video
+  // （kling-video-v3 / minimax-video-h3）。它们**不在**官方 cli/craft 对话
+  // agent 的引用清单里，靠「补齐 data.models」路径混进对话菜单，走各自的
+  // 任务通道（按次/按秒计费），也不下发 credits 系数，对话端点不认。
+  // ⚠️ 无系数但有 maxInput/maxOutput 的条目（hunyuan-chat / hy4-preview）
+  // 是**对话模型**，不在此列 —— 系数留空按「未下发」如实展示。
+  if (Array.isArray(tags) && tags.some((tag) => typeof tag === 'string' && /-to-(?:image|video)$/.test(tag))) return false
+  if (typeof meta?.videoGeneration === 'object' && meta.videoGeneration !== null) return false
   return true
 }
 

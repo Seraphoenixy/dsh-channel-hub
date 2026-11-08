@@ -32,6 +32,7 @@ import { isQoderExpired, type QoderCredential } from './qoder.js'
 import { QoderEncryptedInfer, type QoderInferMessage, type QoderInferRequest, type QoderInferTool, type QoderInferToolCall } from './qoder-wasm.js'
 import { unwrapQoderEnvelopeStream } from './qoder-envelope.js'
 import { QODER, type QoderFallbackModel, type QoderModelPromotion, type QoderProduct } from './qoder-product.js'
+import { reasoningRankOf } from './reasoning-ladder.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
 import {
   registerAdapterIdempotent,
@@ -137,15 +138,44 @@ const QODER_EFFORT_NAMES: Readonly<Record<string, string>> = {
   max: '最大',
 }
 
+/** 未登记档位 id 的排序权重（大于任何已知强度，使它们统一落到末尾）。 */
+const UNKNOWN_EFFORT_RANK = 100
+
 /**
- * 该模型在 UI 上可选的思考档位（复刻客户端 `gU()` 的行为）。
+ * 把档位 id 列表按**强度**稳定排序（由弱到强，「关闭思考」在最左）。
+ *
+ * 强度序来自 `src/reasoning-ladder.ts` 的 `REASONING_EFFORT_RANK`（跨 provider 权威表），
+ * 不另立一份 —— 两份必然漂移，而漂移的症状是「同一个档位在两处算出不同位置」。
+ * 未登记的 id 排在末尾、彼此保持原相对顺序（与官方客户端 `?? ORDER.length` 同义）。
+ */
+export function sortEffortsByStrength(efforts: readonly string[]): string[] {
+  return efforts
+    .map((id, index) => ({ id, index, rank: reasoningRankOf(id) ?? UNKNOWN_EFFORT_RANK }))
+    .sort((a, b) => (a.rank - b.rank) || (a.index - b.index))
+    .map(({ id }) => id)
+}
+
+/**
+ * 该模型在 UI 上可选的思考档位（复刻客户端 `gU()` + `displayReasoningEfforts()`）。
  *
  * 三条口径：
- * 1. `efforts` 原样取用（目录顺序保持 —— 官方客户端也按对象键序渲染）；
+ * 1. `efforts` 取目录的 `thinking_config.enabled.efforts` 键，再**按强度序重排**（见下）；
  * 2. `supportsDisable` 为真时**追加** `none`（即「关闭思考」）；
  *    客户端 `gU()`：`… || e.includes('none') ? e : [...e, 'none']`。
  * 3. 两者皆无 → 返回空数组，调用方**不声明 `reasoning`**
  *    （UI 显示「当前模型未提供推理等级」，对应 IDE 的「不支持」）。
+ *
+ * ⚠️ **必须重排，不能原样透传目录键序**（上游 2026-10-20 修正，其旧注释
+ * 「目录顺序保持 —— 官方客户端也按对象键序渲染」**是错的**）。
+ * 官方客户端拿到键序后还会再排一遍，取证是 CN 0.4.8 asar
+ * `out/renderer/assets/index-DDa3WwIe.js` 的 `displayReasoningEfforts()`：
+ * 按强度稳定排序、未登记排末尾、同排名保持原序。
+ *
+ * 不排的后果（实测，`dfmodel` 的真实键序 `high/max/low`）：DSH 侧拿到
+ * `高 → 最大 → 低 → 关闭思考`，而依赖「位置 = 强度」的 UI（如
+ * `dsh-codex-effort-slider` 的滑条）会把 `最大` 画在 `高` 左边、把
+ * `关闭思考` 画到最右并点亮满格能量 —— 越往右越弱、关掉思考反而最亮。
+ * 排序后是 `关闭思考 → 低 → 高 → 最大`，与 Qoder IDE 自己显示的顺序一致。
  *
  * ⚠️ **`qmodel` / `qmodel_latest` 这类「有 `disabled` 但无 `efforts`」的模型
  * 会得到 `['none']`** —— 即只提供「关闭思考」一项。这是**远端事实**
@@ -155,7 +185,7 @@ const QODER_EFFORT_NAMES: Readonly<Record<string, string>> = {
 export function qoderEffortsFor(model: QoderFallbackModel): string[] {
   const efforts = [...(model.efforts ?? [])]
   if (model.supportsDisable === true && !efforts.includes('none')) efforts.push('none')
-  return efforts
+  return sortEffortsByStrength(efforts)
 }
 
 /**
@@ -849,7 +879,7 @@ export class QoderAdapter extends LlmAdapter {
 
       // ⚠️ 消费 SSE 时**捕获流内排队错误**，走与 HTTP 层**完全相同**的等待逻辑。
       // `consumeOpenAiSse` 是生成器：无法「try 一次再重试」，故这里手动迭代，
-      // 捕获到排队就等待后重发整条请求（排队期间未产出任何 chunk，可安全重放）。
+      // 捕获到排队就等待后重发整条请求 —— **仅限尚未产出任何 chunk 时**（见下）。
       const inner = consumeOpenAiSse(
         unwrapQoderEnvelopeStream(response, 'qoder'),
         { signal: options.signal },
@@ -862,12 +892,20 @@ export class QoderAdapter extends LlmAdapter {
       )
       const iterator = inner[Symbol.asyncIterator]()
       let queued = false
+      // 本次请求是否已向下游发出过片段。排队错误在**已出字之后**到达时，
+      // 重发整条请求会让下游收到重复的正文/工具调用 —— 只能如实抛错
+      // （上游 2026-10-27 修；此前无条件等待后重放，「排队先于首帧」与
+      // 「流中排队」两种形态被混为一谈，后者会重复计费正文）。
+      let emittedAnyChunk = false
       for (;;) {
         let step: IteratorResult<StreamChunk>
         try {
           step = await iterator.next()
         } catch (error) {
           if (error instanceof ModelQueuedError) {
+            // ⚠️ 已向下游发出片段后不能重放排队请求，避免重复正文或工具调用；
+            // 未出字时重放是安全的（服务端尚未产出内容）。
+            if (emittedAnyChunk) throw error
             await this.waitForQueue(
               queueInfoOf(error),
               ++queueAttempts,
@@ -896,6 +934,7 @@ export class QoderAdapter extends LlmAdapter {
         }
         if (step.done === true) break
         yield step.value
+        emittedAnyChunk = true
       }
       if (queued) continue
       return
@@ -991,13 +1030,24 @@ export class QoderAdapter extends LlmAdapter {
     const waitMs = qoderQueueDelayMs(queueInfo)
     // ⚠️ 拿不到服务端延迟时**不忙等**：用保守的短退避，避免瞬间烧掉机会
     // （客户端 W7c() 此时会退回 ltA() 指数退避）。
-    await this.sleep(waitMs ?? 1_000, options.signal)
+    // ⚠️ 服务端给 0 时保底 100ms（否则不同机器上会出现无间隔的忙循环）；
+    // 且单次等待**钳制在剩余预算内** —— 一次较长的 Retry-After 不能越过
+    // 用户设定的总超时（上游 2026-10-27 修，此前 `sleep(waitMs)` 可以
+    // 一次等过 deadline，醒来还带着一个注定超时的重放再跑一轮）。
+    const requestedWaitMs = Math.max(100, waitMs ?? 1_000)
+    const remainingMs = Math.max(0, deadline - Date.now())
+    await this.sleep(Math.min(requestedWaitMs, remainingMs), options.signal)
     // ⚠️ 这次检查**不是**上一次的重复：它检测的是「**等待期间**被中止」。
     // `AbortSignal.aborted` 是随时间的可变状态，但 TS 会静态窄化成字面量
     // `false` 而报「无重叠」—— 故经**不透明函数**读取，避免静态收窄掩盖
     // 这个真实场景（`await` 之后状态可能已变）。
     if (isAborted(options.signal)) {
       throw new LlmError('qoder: 排队等待期间请求已取消', 'QUEUE')
+    }
+    // 等待可能吃满剩余预算：醒来后立即复判，把超时就地兑现，
+    // 不再让「必然超时的重放」进入下一轮。
+    if (Date.now() >= deadline) {
+      throw new LlmError('qoder: 排队等待超时', 'QUEUE')
     }
     // ⚠️ 排队**不刷新凭据**、不换账号：它与认证和额度都无关。
   }

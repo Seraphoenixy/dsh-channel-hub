@@ -169,6 +169,26 @@ test("catalog deduplicates requests, zero rate survives, refresh failure preserv
   const restarted = new CatalogService(store);
   assert.equal((await restarted.load("p:a")).models.length, 1);
 });
+test("persist failure keeps the fresh catalog in memory instead of reporting a directory error", async () => {
+  // 真实缺陷修正（2026-11-08）：`set` 与 fetch 同在一个 try 时，存储忙会
+  // 把刚发现的整份新目录丢弃并报成「目录失败」。现在只放弃持久化。
+  let setCalls = 0;
+  const c = new CatalogService({
+    async call(method: string, key: string, v?: unknown): Promise<any> {
+      if (method === "set") {
+        setCalls++;
+        throw Error("记账超时(5000ms): set");
+      }
+      return undefined;
+    },
+  });
+  const snapshot = await c.refresh("p:x", async () => [{ id: "fresh", name: "Fresh" }]);
+  assert.equal(snapshot.stale, false);
+  assert.equal(snapshot.error, undefined);
+  assert.deepEqual(snapshot.models.map((m) => m.id), ["fresh"]);
+  // 内存缓存立即可用（本进程内模型菜单不回退）。
+  assert.equal((await c.load("p:x")).models[0].id, "fresh");
+});
 test("successful empty directory removes vanished models", async () => {
   const values = new Map();
   const c = new CatalogService({
@@ -183,7 +203,7 @@ test("successful empty directory removes vanished models", async () => {
 test("renewal single-flight and unknown expiry are not guessed", async () => {
   const a = {
     id: "one",
-    provider: "qoder",
+    provider: "qodercn",
     nickname: "x",
     enabled: true,
     credentialRef: "ref",
@@ -210,7 +230,7 @@ test("renewal failure backs off without discarding account", async () => {
   let calls = 0;
   const a = {
     id: "one",
-    provider: "qoder",
+    provider: "qodercn",
     nickname: "x",
     enabled: true,
     credentialRef: "ref",
@@ -303,7 +323,7 @@ test("physical attempts and concurrent request accounts stay isolated", async (t
   }
   await Promise.all(
     ["one", "two"].map(async (account) => {
-      for await (const _ of o.stream("qoder", "m", () => run(account))) {
+      for await (const _ of o.stream("qodercn", "m", () => run(account))) {
       }
     }),
   );
@@ -341,7 +361,7 @@ test("each transport retry is logged, while final request counts once", async (t
     await r.text();
     yield { type: "text-delta", text: "x" };
   }
-  for await (const _ of o.stream("qoder", "m", run)) {
+  for await (const _ of o.stream("qodercn", "m", run)) {
   }
   assert.equal(db.stats().totals.requests, 1);
   assert.equal(db.stats().totals.attempts, 2);

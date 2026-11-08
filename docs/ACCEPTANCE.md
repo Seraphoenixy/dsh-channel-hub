@@ -4,6 +4,93 @@
 
 ## 已完成
 
+- **上游月度审查移植批次（2026-11-08，用户要求按审查结论执行）**：对三个上游（OFM 基线 `5923ebe`、Connect 基线 `3738a11`、iJetLi 参考基线 `9719ccf`）做基线 → HEAD 全量比对（OFM 308 提交、iJetLi 419 提交），按结论移植六项、排除四项。来源策略与 vendor 记账表同步更新（`docs/ARCHITECTURE.md`：OFM 已把 buddy/llm-adapter/models/service 移出源码树，这些协议的活基准转移至 iJetLi 仓库；Connect 停更且基线提交不在上游历史）。
+
+  1. **undici 8.11.2 → 8.12.2**（`package.json`）：上游 OFM PR #735 安全升级，修复 TLS 重协商 DoS。依赖已打入 dist，`npm run build` 重建。夹具测试不覆盖传输库本身；产物内版本已核（`8.12.2`）。
+
+  2. **Qoder 档位按强度排序**（`vendor/ofm/src/qoder-adapter.ts`）：目录键序是采集序（实测 `dfmodel` 为 `high/max/low`），官方客户端会按强度稳定重排（CN 0.4.8 asar `displayReasoningEfforts()` 取证，未登记 id 排末尾）；强度表复用既有 `vendor/ofm/src/reasoning-ladder.ts`，不另立一份。不排的后果：依赖「位置 = 强度」的 UI（effort 滑条）把「最大」画在「高」左边、「关闭思考」点亮满格。验证：`tests/qoder-efforts.test.mjs` 6 项。
+
+  3. **SSE 排队重放守卫 + 等待预算钳制**（`vendor/ofm/src/qoder-adapter.ts`）：① 流内排队错误在**已向下游发出片段后**不再等待重放（重复正文/工具调用风险），直接抛错；未出字时保持既有重放语义。② `waitForQueue` 单次等待钳制在剩余预算内、服务端 0 延迟保底 100ms、醒来后立即复判 deadline——长的 Retry-After 此前可以越过用户设定的总超时，0 延迟会忙循环。验证：`tests/qoder-queue.test.mjs` 4 项（注入 sleep，30ms 真实计时用例验证醒来即超时）。
+
+  4. **工具参数截断判据修正**（`vendor/ofm/src/sse.ts`，上游 issue #474）：解析失败后再扫字符串/转义状态与括号深度，只有**结构不完整**（`inString || depth !== 0`）才补 `{}`；结构完整但语法非法的原样返回，让 schema 校验把真实病因回传给模型——旧实现会把模型输出错误的参数伪造成 `{}` 并冒充「已达到输出上限」。同批：`openai-compat.ts` 的 finally 在 `releaseLock()` 前先 `reader.cancel()`，提前释放上游连接（未单独夹具，靠既有 SSE 套件回归 + 与上游逐行一致）。验证：`tests/sse-truncation.test.mjs` 5 项。
+
+  5. **CodeArts 收图能力**（`vendor/ofm/src/models.ts` + `llm-adapter.ts`）：目录 `supports_images` 宽容透传 + `CODEARTS_IMAGE_CAPABLE_OVERRIDES` 覆盖表（`deepseek-v4.1-flash` / `-1017`，2026-11-05 上游真机 wire 实测能收图、对照组 `glm-5.3` 406）+ 共享判据 `isCodeArtsImageCapable`（覆盖表 ∪ 目录声明，与 `isVisualModelId` 刻意分开）；`listModels` / `resolveModel` / `prepareCall` 按判据声明 `['text','image']`（`prepareCall` 不再硬覆盖 `['text']`）。验证：`tests/context-report.test.mjs` 4 项。**真实账号收图验收未做**——发布该能力前需按渠道规则单独验收（VL 模型 `kimi-k2.6-vl` / `Qwen3-VL-235B` 仍不进对话目录，不受影响）。
+
+  6. **COSY_VERSION 基线 1.1.38 → 1.1.79**（`vendor/connect/cosy.js`）：官方 IDE 0.5.6 run manifest 自称 `cli_version = 1.1.79-hotfix.18`（取 1.1.79 不带预发布后缀——semver 预发布低于同位正式版）；参考实现真机实测 `fast` 闸门 `{app: 1.1.66, cli: 1.1.70}` 且目录在 1.1.70 封顶。此常量是探测策略（`src/core/declared-version.ts`）的基线与回滚目标；推理平面 `qoder-wasm.ts` 的 1.1.49 是独立常量，不动。验证：`tests/host.test.mjs` 版本闸门夹具随基线抬到 1.1.80，采纳/回滚端到端 3 项通过（此测试跑 dist 产物，已重建后复跑）。**真实账号的目录与推理复核未做**——基线抬升理论上已被上游真机覆盖，但按本项目口径仍需一次真实「更新模型」+ 一次 Qoder 推理确认后才能关闭。
+
+  7. **审查后排除的项**（不移植，记录原因）：Trae 缓存扣减（本项目已有更全实现，含 cacheWrite 口径）；签到跨天巡检（上游为独立服务形态的缺陷，本项目 5 分钟 tick + 指数退避天然覆盖）；Qoder `app` 场景合并（`src/drivers/qoder-catalog.ts` 已同日独立实现）；Buddy `x-anthropic-billing-header` 新指纹（本项目整篇替换 system，天然覆盖）。**已实现待复核**：CodeArts UA 覆盖已在 `src/drivers/user-agent.ts` 存在（2026-11-04 条目），按上游实测矩阵（只有行首 `deepseek-harness/` 前缀被 WAF 拒）判定合规，真实推理验收时顺带确认。
+
+  8. **遗留（本批不做，已登记）**：CodeArts 403 业务码单列（`TM.00000001` WAF / `TM.00001041` 并发上限 / `TM.000010051` 租户未开通——现行 `isCodeArtsTransientFailure` 把 `TM.00000001` 当瞬时容量，UA 覆盖后该码应不再出现，但分类精度仍值得补）；Loomy 兜底表补 `DeepSeek-V4.1-Flash`（2026-11-06 上游真机实测 1M / x2.0，断网冷启动选它会整轮失败）；Qoder 排队期间换号（`switchAccountOnQueue`，大件需单独立项）。
+
+- **实现审查：修掉 4 个真实缺陷（2026-11-08，用户问「还有没有其它问题」）**：
+
+  1. **审查方式**：自查三轮会话新增代码 + 对 `src/` 全量（drivers/core/storage/host/index/client）做缺陷扫描（竞态、资源泄漏、错误处理、数据形状假设、键生命周期），每个疑点回读 vendor 依赖确认调用路径可达后才修。4 项发现全部亲自复核实证。
+
+  2. **修复①——qodercn 目录回滚不区分瞬态失败**（`src/drivers/ofm.js`）：旧实现里已采纳版本**任何**失败（含 30s 超时/5xx/网络抖动）都会在基线兜底成功后清除采纳并落盘 —— 一次抖动把刚解锁的模型撤下去最长 24h（探测闸已置位）；且清除前不复核，可能误抹并发探测刚采纳的更新版本。现在：只有**形状级失败**（HTTP 200 但 JSON/场景解析不了，`probeKind: "shape"`）才清采纳并落盘；HTTP/网络失败按瞬态**只对本轮**退回基线、保留采纳并留痕日志；清除前复核 `adopted.version === rolled`。
+
+  3. **修复②——探测把 429/401 等状态类失败记成永久硬拒绝**（`src/drivers/ofm.js` 探测分支）：探测每轮并发 6 个请求打同一端点，最容易被限流的就是这批请求；旧判据 `status >= 500 ? 瞬态 : 硬拒绝` 会把 429/408/401（凭据临期）持久化进 `state.rejected`，候选阶梯逐轮被拉黑直至空转，重启也不恢复。现在：请求级失败（网络/HTTP/形状）一律瞬态不记忆；硬拒绝只留给「候选缺既有模型」这一确定性结果（`runVersionProbe` 内部判定）。
+
+  4. **修复③——每条会话在插件 scope 泄漏一条 effect**（`src/host/session-model.ts`）：`ctx.effect(() => () => offAssembly())` 挂在插件 scope 上，每个普通会话（`agent/created`）累积一条、直到插件卸载才执行，闭包持有整个 session —— 内存随会话数单调增长。现在清理挂在会话自己的 scope（`agent.ctx.effect`，缺失时回退插件 scope）：会话结束或插件卸载级联 dispose 时清理。
+
+  5. **修复④——目录快照落库失败被当成目录失败**（`src/core/catalog.ts`）：`store.set` 与 `fetcher()` 同在一个 try，存储 worker 被 UI 大查询/`prune` 拖住超过 5s 时，**刚发现的整份新目录被丢弃**并报成「目录失败：记账超时」。现在落库单独 try：失败只放弃持久化，新模型进内存缓存立即可用（代价仅是重启后回退旧快照）。
+
+  6. **测试**：`tests/declared-version.test.ts` 的「状态类失败被记住」用例改为「请求级失败一律瞬态不记忆」（硬拒绝路径由「缺既有模型」用例单独钉住）；`tests/host.test.mjs` 的回滚夹具从 503 改为**形状损坏的 200**（与「形状级才回滚」的新判据一致，并顺带验证探测轮不拉黑）；`tests/core.test.ts` 新增「落库失败保留新目录」用例。`npm run check` 全绿（类型检查干净；核心 165、错误链 139、客户端 34、宿主 5、安装包 9 文件）。
+
+  7. **确认安全但值得知道的边界**（逐项读完未发现可指认缺陷，仅记录）：探测的当前模型集取全部账号快照并集、候选只用第一个启用账号凭据 —— 若 Qoder 存在按账号权益的目录差异会误判（未实证）；`rejected` 记录到 50 条截断上限后纯拒绝更新不再触发落盘（只影响重启后是否重试旧候选）；存储 worker 单线程，慢查询会拖住记账写入（计入 `failedWrites`，不影响推理）；硬停机不取消在途登录（dev 热重载有 `waitForLogins` 兜底）；SQLite 锁的陈旧判定用 `process.kill(pid,0)`，Windows 上 PID 复用时需手动删 `.lock`。
+
+- **WorkBuddy 目录混入无系数模型：视频模型被当成对话模型（2026-11-08，用户报障「workbuddy 渠道会解出来好几个没有系数的模型」）**：
+
+  1. **先对账、再定性**（只读复制 `ledger.sqlite` 查目录快照 + 只读探针打 `/v3/config`，不打印凭据）：快照里 23 个模型 **20 个都带系数**，没系数的只有 2 个 —— `kling-video-v3` 与 `hy4-preview`，并非「好几个」都异常。探针实证 `kling-video-v3` 的原始条目带 `tags: ["text-to-video","image-to-video"]` 与整块 `videoGeneration` 配置（分辨率/时长/首尾帧/音频模式），是**视频生成模型**：不在官方 cli/craft 对话 agent 引用清单里（快照 `agentReferenced=false`）、不下发 `credits`，靠解析的「补齐 data.models 其余可对话模型」路径混进对话菜单 —— `isChatModel` 的四条判据（前缀 / `supportsExtra` / 微小输出上限 / `text-to-image` 标签）都不覆盖视频。
+  
+  2. **改动**（`vendor/ofm/src/buddy.ts` 的 `isChatModel`，一处）：新增视频判据 —— `tags` 含 `text-to-video` / `image-to-video`，或条目携带 `videoGeneration` 对象，与 `text-to-image` 同理滤出对话菜单。已记入 `docs/ARCHITECTURE.md` vendor 表。
+  
+  3. **`hy4-preview` 保留不动**：它来自企业端点（scoped）且**是官方 `cli` agent 自己引用的对话模型**，只是上游未公布系数 —— 按「目录未下发的字段保持为空，不以默认值或推算值填充」的既有口径如实显示；不需要可在模型开关单独关闭。
+  
+  4. **测试**（新增 `tests/buddy-catalog.test.mjs` 2 项，接入 `test:errors`，错误链现 138 项）：企业端点 500 → `/v3/config` 回退路径下，视频模型（含 `videoGeneration` 块）与图片模型均被滤出、正常计费模型保留且系数不丢；官方 agent 引用但无系数的预览模型不被过滤（`creditsRate` 留空）。夹具全合成、不联网、不读真实账号。`npm run check` 全绿（类型检查干净；核心 164、错误链 138、客户端 34、宿主 5、安装包 9 文件）。
+  
+  5. **未验证 / 未改动**：`kling-video-v3` 从菜单消失后，视频生成能力本就不在本插件范围（无对话端点对接），不补视频链路；企业端点（scoped）对探针的裸 `fetch` 回 HTML 而插件成功取到模型 —— 差异在宿主 fetch 包装链，未深究（不影响结论：`/v3/config` 与快照数据已足够定性）；宿主需重载插件（重启或 dev 热重载）才会载入新 `dist/`。
+
+- **同日追加：buddy 渠道的 `hunyuan-image-alpha-edit` 同根同源（用户追问「Hunyuan Image Alpha Edit 呢」）**：
+
+  1. **定性**（只读快照 + scoped 端点探针）：buddy 目录 33 个模型里无系数的有 3 个 —— `hunyuan-image-alpha-edit`（`tags: ["image-to-image"]`，无 credits、无 maxInputTokens，**图像编辑模型**）、`hunyuan-chat`（Hunyuan-Turbos，无 credits 但**有 maxInputTokens=200000 / maxOutputTokens=8192**，对话形状齐全）、`hy4-preview`（官方 agent 引用）。scoped 端点还实证 `minimax-video-h3`（视频模型）——上一轮的视频判据已覆盖它；`/v3/config` 里的 `hunyuan-image-alpha`（文生图，x5.00）本来就被 `text-to-image` 判据正确滤掉。
+  
+  2. **改动**（`vendor/ofm/src/buddy.ts` 的 `isChatModel`，同一处改写）：把逐 tag 枚举泛化为**模态转换任务家族**判据 —— `tags` 匹配 `*-to-image` / `*-to-video` 后缀（覆盖 text-to-image / image-to-image / text-to-video / image-to-video 及未来变体），`videoGeneration` 配置块判据保留。`hunyuan-chat` / `hy4-preview` 这类「无系数但对话形状齐全」的条目**不在此列**（注释钉死），系数留空如实展示。
+  
+  3. **测试**：`tests/buddy-catalog.test.mjs` 扩到 3 项 —— 新增「`image-to-image` 编辑模型与文生图、视频模型一并滤出」；「无系数但带 maxInput/maxOutput 的对话形状模型（hy4-preview / hunyuan-chat）保留且系数为空」。`npm run check` 全绿（类型检查干净；核心 164、错误链 139、客户端 34、宿主 5、安装包 9 文件）。
+  
+  4. **未验证 / 未改动**：`hunyuan-chat`（Hunyuan-Turbos）与 `hy4-preview` 的**真实推理**未实测 —— 上游未公布价格不代表不可用，首次真实对话即验收点；若上游实际不在对话通道提供它们（报业务错误），再按证据收窄补齐路径的判据；模态转换 tags 家族判据对「同形新任务」（如 `*-to-audio`）未覆盖，出现时按同一模式扩展。
+
+- **目录声明版本自动更新机制（2026-11-08，用户要求「各渠道声明自身的版本会自己更新」）**：
+
+  1. **背景**：渠道声明的客户端版本是硬编码常量，上游按声明版本对模型做每模型 `minimal_version` 闸门裁剪（Qoder 实测记录在 `vendor/ofm/src/qoder-catalog.ts`）——版本落后时新模型（如 Qoduck）被服务端**静默**裁掉，插件遵守「只发布动态发现的条目」，模型凭空消失。仓库内没有任何可订阅的上游版本源（全仓查证，唯一动态解析先例 LobsterAI 的实现不在快照内）。因此「自更新」只能用**真实只读目录请求**探测实现。
+
+  2. **机制**（`src/core/declared-version.ts`，每渠道 opt-in，本期只启用 qodercn）：从生效版本生成候选阶梯（2 个补丁步 + 3 个次版本步 + 1 个主版本步，共 6 个）；目录刷新成功后跑探测轮（时间闸默认 24h、单飞、用第一个启用账号的凭据并行取 6 个候选）。采纳判据从严：候选必须可解析且模型 id 集合**包含**当前集合（缺既有模型 = 硬拒绝并记住），采纳**达到最大集合的最低候选**（单轮收敛到阶梯顶部，版本号保持「刚好过闸」形态）；4xx/解析失败 = 硬拒绝（不再试），网络/5xx = 瞬态（下轮再试）；**无增益不采纳，身份零漂移**。已采纳版本失效时 discover 同请求退回基线重试一次，成功则清除采纳并留痕。探测轮全吞异常，绝不影响「更新模型」的结果。基线取 vendor 的 `COSY_VERSION`（1.1.38），回滚终点与探测起点同源。
+
+  3. **vendor 改动（记账）**：`vendor/connect/cosy.js` 的 `buildCosyHeaders` 增加可选第 4 参 `overrides.cosyVersion`，同时覆盖 `Cosy-Version` 头与签名载荷里的 `cosyVersion`（同值同签名）；缺省恒为原常量，推理平面（`qoder-wasm.ts` 的 1.1.49）不经此处。已记入 `docs/ARCHITECTURE.md` vendor 表。
+
+  4. **观测**：`channels.list` 渠道级下发 `catalogVersion {version, baseline, adopted, adoptedAt?}`（渠道卡片显示「目录版本 x.y.z」，悬停给采纳时间与回滚终点）；`models.refresh` 全量聚合带 `versionNotes`（「Qoder CN 目录版本 1.1.38→1.1.39，新增 N 个模型」/「已回滚」），界面结果行拼接展示。采纳后**当场重刷**快照，新模型同轮进菜单，不等下一次手动刷新。
+
+  5. **测试**：`tests/declared-version.test.ts` 8 项（阶梯形状；「最低达标候选」采纳；无增益不采纳；缺模型硬拒绝；4xx 记忆/瞬态不记；拒绝跳过；采纳持久化与拒绝记录有界；时间闸 env 口径）。`tests/host.test.mjs` 版本闸门夹具端到端：`/model/list` 按声明 `Cosy-Version` 头路由（≥1.1.39 下发 `qoduck`）→ 全量刷新断言 `versionNotes`、模型菜单含 `qoduck`、`channels.list.catalogVersion.adopted=true`；翻转为非基线版本 503 → 断言回滚留痕、菜单复原、`adopted=false`。`npm run check` 全绿。
+
+  6. **边界与未验证**：① 候选是**有界猜测**（阶梯上限 major+1），闸门更高时本轮无发现——采纳值永远有真实响应背书，不发布未经验证的模型；② 只自动管理**目录平面**版本，加密推理平面保持已验证的 1.1.49——目录解锁的模型若推理端也有闸门，首次真实推理即暴露，届时按证据把 `qoder-wasm.ts` 预留的 `options.clientVersion` 注入纳入同一策略；③ trae（推理端准入版本，探测要耗积分）、gemini（身份逐字写死防指纹）、buddy（无版本闸门证据）均不启用；④ 真实账号验收见第 7 条（同日完成）。
+
+  7. **真实账号验收（2026-11-08 同日，用户重启 DSH 并点「更新模型」后反馈「未见到 Qoduck」）**：
+
+     1. **机制侧验证通过**（只读复制 `ledger.sqlite` 查 kv，不改运行中 profile）：`catalog-version-probe-at:qodercn` 有探测轮留痕；`catalog-version:qodercn` 记录**采纳 1.2.0**（from 1.1.38）；两账号目录快照同步出现 `fast` 与 `jmodel` —— 探测→采纳→当场重刷全链路在真实凭据上成立。闸门值回记：`fast` 的 cli 闸门 1.1.70（与 vendor 既有实测一致），`jmodel` ≤ 1.2.0；采纳值 1.2.0 即「最低达标候选」，阶梯按设计收敛。
+     2. **Qoduck 不是被版本闸门挡住的**：只读探针（`.cache/qoder-qoduck-probe.mjs`，同一目录端点、声明版本 1.2.0）实测——QoDuck 以 **`lmodel`** 之名在 **`app` 场景**下发（`chat` 12 条 / `app` 13 条，唯一差异就是它），条目**没有 `minimal_version`**，基线版本时代就一直在下发。它免费（`price_factor 0`、原价 0.5、`is_free`），视觉+思考（`xhigh/high/low`，可关闭），档位表 {200K 默认, 400K, 1M}。
+     3. **修复**：新增 `src/drivers/qoder-catalog.ts` 的 `parseQoderCatalogModels`——`chat` 与 `app` 两场景**按 id 并集合并**（chat 优先、app 独有条目按原序追加；两场景都解析不出才算无法识别）；`ofm.js` 的 `fetchQoderCatalog` 与版本探测共用同一解析，「集合增益」口径不分叉。`tests/qoder-catalog.test.ts` 5 项（纯 chat / 纯 app / 并集去重 / 双缺 / lmodel 档位与窗口字段）；`tests/host.test.mjs` 夹具补 `app` 场景并锁定基线菜单 `["dfmodel","lmodel"]`、采纳后 `["dfmodel","qoduck","lmodel"]`、回滚后 QoDuck 不退场。`npm run check` 全绿（核心 164、错误链 136、客户端 34、宿主 5）。
+     4. **未验证 / 附带说明**：`lmodel` 的**推理平面**未实测（无 `minimal_version`，理论上与其它模型同路；首次真实对话即验收）；`fast`（用户 2026-10-20 明确过「不需要」）与 `jmodel` 随版本采纳进入菜单——模型开关可单独关闭，目录口径「只发布动态发现条目」不变；探针结论来自单账号双版本采样，`app` 场景在其他账号/区域的表现未采样。
+
+- **移除 Qoder 国际版渠道（2026-11-08，用户要求）**：
+
+  1. **改动**：渠道注册表（`src/drivers/ofm.js` 的 `specs`）删去 `qoder`（Qoder 国际版）条目，只保留 `qodercn`；Qoder 两区域本就共用同一套协议实现（vendor 的 `qoder-auth` / `qoder-adapter` / `qoder-wasm`），CN 渠道不受影响。连带清理：`client.ts` 渠道配色、`migration.ts` 的国际版导入路径（`convertLegacy` 不再接受 provider `qoder`；connect 注册表 `kind:"qoder"` + `region:"global"` 的条目连同 `qoder-global-session.json` 一起跳过，绝不把国际版凭据当成 CN 导入；默认候选表删去 `qoder-global`）、README 渠道表。vendor 快照不动（`QODER` 配置仍在 vendor 内部，仅插件不再挂载）。
+
+  2. **历史账号口径**：已登录的国际版账号走既有孤儿机制 —— 启动时记「N 个账号的渠道未注册，已跳过」，可用 `accounts.orphans` 查看、`accounts.delete` 清理，不会静默删除；渠道重新加回后账号仍可用（README 故障排查同款口径）。
+
+  3. **测试**：`tests/host.test.mjs` 渠道数 9→8（`channels.list` / `models.refresh` / `llm.adapters.size`），「无账号渠道被跳过」与「无大窗口档渠道拒绝开关」的夹具从 `qoder` 换成 `qodercn`；`tests/migration.test.ts` 与 `tests/qoder-identity.test.ts` 的夹具统一到 `qodercn`，并各新增 1 项钉死「旧国际版会话不再可导入」（`convertLegacy("qoder", …)` 返回 `undefined`）；`checkin` / `core` / `client` 测试的合成 provider 名同步换 `qodercn`。`npm run check` 全绿（类型检查干净；核心 151、错误链 136、客户端 34、宿主 5、安装包 9 文件）。
+
+  4. **未验证 / 未改动**：未做国际版真实账号的删除/迁移实机操作（本地如有国际版账号，重启宿主后应看到孤儿提示；未实测）；docs/ACCEPTANCE.md 与 ARCHITECTURE.md 中的历史条目按记录惯例保留原文，不回改。
+
 - **Qoder 加密请求释放 WASM 内存（2026-11-06）**。国区账本记录三次 `unreachable`，均无推理 HTTP 尝试。离线用合成凭据、约 4 MiB 的图片数据及 96 MiB 的 WASM 内存上限复现，第 7 次请求构造失败。修复后相同探针连续构造 160 次成功，WASM 内存维持在 32 MiB。回归测试检查重复构造时的内存增长和请求输出。未使用真实账号做推理验收。
 
 - **Trae 缓存命中率恒为 0%：`token_usage` 的缓存计数自 2026-10-27 起不再上报，0 被当成了「未命中」的测量**（2026-11-02，用户报障「又出现了 trae 渠道的模型缓存命中率未正确统计的问题」）：

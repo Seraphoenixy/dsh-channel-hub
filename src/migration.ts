@@ -33,7 +33,9 @@ export function convertLegacy(
       enterprise_id: c.enterprise_id ?? c.enterpriseId,
       account_type: c.account_type ?? c.accountType,
     };
-  } else if (provider === "qoder" || provider === "qodercn") {
+  } else if (provider === "qodercn") {
+    // 旧国际版（provider "qoder"）不再支持：落入这里会被当作未知产品返回
+    // undefined，由 importAll 以 unsupported-product 记录，不静默丢弃。
     const machine = c.machine_id ?? c.machineID ?? c.machineId;
     if (!(c.token ?? c.access_token) || !c.uid || !machine) return; // No invented device identity for an existing session.
     credential = {
@@ -120,7 +122,6 @@ export class MigrationService {
         region: i === 3 ? "global" : "cn",
       })),
       { id: "qoder", kind: "qoder", region: "cn" },
-      { id: "qoder-global", kind: "qoder", region: "global" },
       { id: "trae", kind: "trae", region: "cn" },
     ];
     const entries = Array.isArray(registry)
@@ -157,6 +158,8 @@ export class MigrationService {
     for (const a of entries) {
       if (typeof a.id !== "string" || !/^[-\w]+$/.test(a.id)) continue;
       const kind = a.kind ?? a.type;
+      // Qoder 国际版（region "global"，旧 provider "qoder"）已移除：
+      // 连同它的会话文件一起跳过，绝不把国际版凭据当成 CN 导入。
       let provider =
         kind === "workbuddy"
           ? a.region === "global"
@@ -164,26 +167,21 @@ export class MigrationService {
             : "buddy"
           : kind === "qoder"
             ? a.region === "global"
-              ? "qoder"
+              ? undefined
               : "qodercn"
             : kind === "trae"
               ? "trae"
               : undefined;
       if (!provider) continue;
       const filename =
-        kind === "qoder"
-          ? provider === "qoder"
-            ? "qoder-global-session.json"
-            : "qoder-session.json"
-          : a.id + ".json";
+        kind === "qoder" ? "qoder-session.json" : a.id + ".json";
       const document = await this.json(
         join(this.home, "connect-auth", filename),
       );
       if (!document && !registry) continue;
       const converted = convertLegacy(provider, document);
       provider = converted?.provider ?? provider;
-      const oldProvider =
-        kind === "qoder" ? (provider === "qoder" ? "qoder2" : "qoder1") : a.id;
+      const oldProvider = kind === "qoder" ? "qoder1" : a.id;
       const disabled = Object.fromEntries(
         [...disabledByOld]
           .filter((s) => s.startsWith(oldProvider + "/"))

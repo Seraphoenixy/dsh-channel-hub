@@ -365,7 +365,6 @@
         codearts: "#c05a5a",
         buddy: "#2f7cf6",
         workbuddy: "#2fa58a",
-        qoder: "#6b6ef5",
         qodercn: "#4c8fd9",
         trae: "#2fa58a",
         loomy: "#d35d8a",
@@ -582,6 +581,7 @@
             else {
               const refreshedAccounts = Number(result?.refreshedAccounts ?? 0);
               const partial = result?.partial && typeof result.partial === "object" ? result.partial : {};
+              const versionNotes = Array.isArray(result?.versionNotes) ? result.versionNotes : [];
               const parts = [
                 "\u5DF2\u66F4\u65B0 " + refreshed + "/" + total + " \u4E2A\u6E20\u9053" + (refreshedAccounts > 0 && refreshedAccounts !== refreshed ? "\uFF08" + refreshedAccounts + " \u4E2A\u8D26\u53F7\u6210\u529F\uFF09" : "")
               ];
@@ -592,6 +592,7 @@
                     ([id, n]) => channelName(id) + " \u5237\u65B0 " + n + " \u4E2A\u8D26\u53F7"
                   ).join("\u3001")
                 );
+              if (versionNotes.length) parts.push(versionNotes.join("\uFF1B"));
               if (skipped.length)
                 parts.push("\u8DF3\u8FC7 " + skipped.length + " \u4E2A\uFF08\u6CA1\u6709\u8D26\u53F7\uFF09");
               if (failures.length) {
@@ -1649,6 +1650,19 @@
                           title: latest ? date(latest) : ""
                         },
                         stale ? "\u76EE\u5F55 \xB7 " + stale + " \u4E2A\u8D26\u53F7\u8FC7\u671F" : latest ? "\u76EE\u5F55 \xB7 " + ago(latest) : "\u76EE\u5F55\u672A\u66F4\u65B0"
+                      ),
+                      /**
+                       * 目录声明版本（仅启用自动更新策略的渠道下发，如
+                       * Qoder CN）。⚠️ 采纳与基线要区分展示：自动改身份必须
+                       * 可见、可追溯，悬停给出采纳时间与回滚终点；基线如实写
+                       * 「内置」。
+                       */
+                      c.catalogVersion && h(
+                        "span",
+                        {
+                          title: c.catalogVersion.adopted ? "\u81EA\u52A8\u91C7\u7EB3\u4E8E " + date(c.catalogVersion.adoptedAt) + "\uFF08\u5931\u6548\u81EA\u52A8\u56DE\u6EDA\u5230 " + c.catalogVersion.baseline + "\uFF09" : "\u5185\u7F6E\u57FA\u7EBF\u7248\u672C"
+                        },
+                        "\u76EE\u5F55\u7248\u672C " + c.catalogVersion.version
                       ),
                       /**
                        * 大窗口档开关（目前只有 Trae 的 Max 1M）。

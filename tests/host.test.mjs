@@ -108,7 +108,7 @@ test(
       const channels = await plugin.dispatch("channels.list");
       const errors = channels.filter((c) => c.error);
       assert.deepEqual(errors, []);
-      assert.equal(channels.length, 9);
+      assert.equal(channels.length, 8);
       assert.equal(
         channels.some((c) => c.id === "lobsterai"),
         false,
@@ -191,7 +191,7 @@ test(
        * rejected 会把满盘皆错报成「全部更新成功」。
        */
       const bulk = await plugin.dispatch("models.refresh", {});
-      assert.equal(bulk.total, 9, "the bulk refresh covers every channel");
+      assert.equal(bulk.total, 8, "the bulk refresh covers every channel");
       assert.ok(
         bulk.failures.some((f) => f.startsWith("buddy：")),
         "a channel whose directory request failed must be named: " +
@@ -200,8 +200,8 @@ test(
       /**
        * ⚠️ 三个桶必须**互斥且穷尽**（2026-10-29 修）。
        *
-       * 旧实现把「没有账号的渠道」也算进 `refreshed`：夹具里 9 个渠道只有
-       * buddy 有账号，界面却显示「已更新 8/9」——用户点完看不到任何变化，
+       * 旧实现把「没有账号的渠道」也算进 `refreshed`：夹具里只有 buddy 有
+       * 账号，其余渠道无事可做，界面却显示「已更新 N−1/N」——用户点完看不到任何变化，
        * 于是报「按钮不能用」。现在无账号的渠道进 `skipped`，既不算成功也
        * 不算失败。
        */
@@ -211,7 +211,7 @@ test(
         "every channel must land in exactly one bucket (refreshed / failed / skipped)",
       );
       assert.ok(
-        bulk.skipped.includes("qoder"),
+        bulk.skipped.includes("qodercn"),
         "a channel with no accounts must be skipped, not refreshed: " +
           JSON.stringify(bulk.skipped),
       );
@@ -247,7 +247,7 @@ test(
       await assert.rejects(
         () =>
           plugin.dispatch("channels.setExtendedContext", {
-            provider: "qoder",
+            provider: "qodercn",
             enabled: true,
           }),
         /大窗口档/,
@@ -499,9 +499,18 @@ test(
     const llm = new LlmRuntime(ctx);
     const previous = process.env.DSH_HOME,
       fetchBefore = globalThis.fetch;
+    const previousProbeMs = process.env.CHANNEL_HUB_VERSION_PROBE_MIN_MS;
     process.env.DSH_HOME = dir;
+    // 版本探测轮的时间闸在本测试里全开（每轮刷新都可探测）。
+    process.env.CHANNEL_HUB_VERSION_PROBE_MIN_MS = "0";
     let inference = 0;
     let buddyInference = 0;
+    // 目录版本闸门夹具开关（见下方 /model/list 分支）：
+    // `qoderGate` 非空 = 声明版本达到该值时额外下发 qoduck；
+    // `qoderBreakAdopted` = 非基线版本回**形状损坏的 200**（无 chat/app 场景），
+    // 驱动回滚路径 —— 形状级失败才清采纳；HTTP 类失败按瞬态只兜底不清除。
+    let qoderGate = "";
+    let qoderBreakAdopted = false;
     const guiFirst = "You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names.";
     const guiSecond = 'When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI.';
     const guiPair = guiFirst + " " + guiSecond;
@@ -545,7 +554,15 @@ test(
         return Response.json({
           models: { "gemini-3.8-flash": { displayName: "Dynamic Gemini" } },
         });
-      if (url.includes("/model/list"))
+      if (url.includes("/model/list")) {
+        // 目录版本闸门夹具（策略见 `src/core/declared-version.ts`）：声明版本
+        // `Cosy-Version` >= `qoderGate` 时额外下发 `qoduck`，复刻上游按每模型
+        // minimal_version 裁剪目录的实测机制（vendor/ofm/src/qoder-catalog.ts）。
+        const version = headers.get("Cosy-Version") ?? "";
+        if (qoderBreakAdopted && version !== "1.1.79")
+          // 形状级失败：HTTP 200 但没有任何场景数组 —— discover 据此判定
+          // 「该版本真的不被支持」并清除采纳；探测轮则按瞬态处理不拉黑。
+          return Response.json({ unexpected: true });
         return Response.json({
           chat: [
             {
@@ -556,8 +573,35 @@ test(
               is_free: true,
               context_config: { large: { token_count: 1000000 } },
             },
+            ...(qoderGate && version >= qoderGate
+              ? [
+                  {
+                    key: "qoduck",
+                    display_name: "Qoduck",
+                    enable: true,
+                    price_factor: 0,
+                    is_free: true,
+                    context_config: { large: { token_count: 1000000 } },
+                  },
+                ]
+              : []),
+          ],
+          // QoDuck（lmodel）只在 app 场景下发且无版本闸门（2026-11-08 实测）：
+          // 任何声明版本都带它，锁定「场景合并」这条路径。
+          app: [
+            {
+              key: "lmodel",
+              display_name: "QoDuck",
+              enable: true,
+              price_factor: 0,
+              is_free: true,
+              is_vl: true,
+              is_reasoning: true,
+              context_config: { large: { token_count: 1000000 } },
+            },
           ],
         });
+      }
       if (url.includes("agent_chat_generation")) {
         inference++;
         const frames = [
@@ -722,7 +766,11 @@ test(
         "the Gemini static window must reach the host",
       );
       const catalog = await llm.listModels("channel-hub/qodercn");
-      assert.equal(catalog.length, 1);
+      // 基线 = chat 场景的 dfmodel + app 场景独有的 lmodel（QoDuck，无版本闸门）。
+      assert.deepEqual(
+        catalog.map((m) => m.id),
+        ["dfmodel", "lmodel"],
+      );
       assert.match(catalog[0].name, /0×/);
       const prepared = await llm.prepareCall({
         provider: "channel-hub/qodercn",
@@ -765,11 +813,66 @@ test(
       assert.equal(buddyRecords.total, 1);
       assert.equal(buddyRecords.items[0].outcome, "success");
       assert.equal(buddyRecords.items[0].attempts[0].accountId, "buddy-test");
+      /**
+       * 目录声明版本自动更新（`src/core/declared-version.ts`）端到端：
+       *
+       * ① 闸门夹具：/model/list 在声明版本 ≥ 1.1.80 时额外下发 `qoduck`
+       *    （复刻上游 minimal_version 裁剪，Qoduck 即被这道闸挡在目录外；
+       *    2026-11-08 基线随 `COSY_VERSION` 抬到 1.1.79，闸门取最低候选 1.1.80）；
+       * ② 采纳：一轮全量刷新 → 探测采纳**最低达标候选** 1.1.80、当场重刷
+       *    快照，`versionNotes` 带走留痕、模型当轮入菜单、`channels.list`
+       *    暴露当前版本与采纳时间；
+       * ③ 回滚：已采纳版本整体 503 → discover 同请求退回基线、清除采纳、
+       *    留痕「已回滚」；模型从菜单退场，kv 复原为未采纳。随后的探测轮
+       *    候选全为瞬态失败 —— 不记硬拒绝，也不再次采纳。
+       */
+      qoderGate = "1.1.80";
+      const adopted = await plugin.dispatch("models.refresh", {});
+      assert.ok(
+        adopted.versionNotes?.some((n) =>
+          n.includes("Qoder CN 目录版本 1.1.79→1.1.80，新增 1 个模型"),
+        ),
+        "the adoption must be reported: " + JSON.stringify(adopted.versionNotes),
+      );
+      assert.deepEqual(
+        (await llm.listModels("channel-hub/qodercn")).map((m) => m.id),
+        ["dfmodel", "qoduck", "lmodel"],
+        "the unlocked model must be in the menu right after the adopting refresh",
+      );
+      const qoderChannel = (await plugin.dispatch("channels.list")).find(
+        (c) => c.id === "qodercn",
+      );
+      assert.equal(qoderChannel.catalogVersion?.version, "1.1.80");
+      assert.equal(qoderChannel.catalogVersion?.baseline, "1.1.79");
+      assert.equal(qoderChannel.catalogVersion?.adopted, true);
+      assert.equal(typeof qoderChannel.catalogVersion?.adoptedAt, "number");
+      qoderBreakAdopted = true;
+      const rolledBack = await plugin.dispatch("models.refresh", {});
+      assert.ok(
+        rolledBack.versionNotes?.some((n) =>
+          n.includes("目录版本 1.1.80 已失效，已回滚到 1.1.79"),
+        ),
+        "the rollback must be reported: " +
+          JSON.stringify(rolledBack.versionNotes),
+      );
+      const afterRollback = (await plugin.dispatch("channels.list")).find(
+        (c) => c.id === "qodercn",
+      ).catalogVersion;
+      assert.equal(afterRollback.adopted, false);
+      assert.equal(afterRollback.version, "1.1.79");
+      assert.deepEqual(
+        (await llm.listModels("channel-hub/qodercn")).map((m) => m.id),
+        ["dfmodel", "lmodel"],
+        "the unlocked model must leave the menu after the rollback (QoDuck stays: no gate)",
+      );
     } finally {
       await plugin?.stop();
       globalThis.fetch = fetchBefore;
       if (previous === undefined) delete process.env.DSH_HOME;
       else process.env.DSH_HOME = previous;
+      if (previousProbeMs === undefined)
+        delete process.env.CHANNEL_HUB_VERSION_PROBE_MIN_MS;
+      else process.env.CHANNEL_HUB_VERSION_PROBE_MIN_MS = previousProbeMs;
       await ctx.stop?.();
       rmSync(dir, { recursive: true, force: true });
     }
@@ -802,7 +905,7 @@ test(
       fiber = ctx.plugin(await import("../dist/index.js"));
       while (fiber.inertia) await fiber.inertia;
       assert.equal(fiber.state, 2, String(fiber._error));
-      assert.equal(llm.adapters.size, 9);
+      assert.equal(llm.adapters.size, 8);
       await fiber.dispose();
       assert.equal(llm.adapters.size, 0);
     } finally {

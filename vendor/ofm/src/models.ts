@@ -95,6 +95,14 @@ export interface RemoteModel {
   contextWindow?: number
   /** 上游下发的单次输出上限（若该端点带）。 */
   maxTokens?: number
+  /**
+   * 上游下发的「能否收图」（`/v1/model/builtin` 的 `supports_images`，若该端点带）。
+   *
+   * ⚠️ 只做**宽容透传**：目录明说 true 才是 true。目录会过期 —— 标 false 的
+   * 模型可能实测能收图（2026-11-05 wire 实测 `deepseek-v4.1-flash` / `-1017`），
+   * 那部分由 {@link CODEARTS_IMAGE_CAPABLE_OVERRIDES} 承载，不在这里翻案。
+   */
+  supportsImages?: boolean
 }
 
 /** 模块级内存缓存：远端拉取或磁盘加载后填充；availableCodeArtsModels 优先读取。 */
@@ -157,11 +165,13 @@ export function parseModelInfo(m: Record<string, unknown>, seen: Set<string>): R
   const maxTokens = positiveInt(
     m['max_tokens'] ?? m['maxTokens'] ?? m['max_output_tokens'] ?? m['maxOutputTokens'],
   )
+  const supportsImages = m['supports_images'] === true
   return {
     id,
     name,
     ...contextWindow === undefined ? {} : { contextWindow },
     ...maxTokens === undefined ? {} : { maxTokens },
+    ...supportsImages ? { supportsImages: true } : {},
   }
 }
 
@@ -193,6 +203,43 @@ function positiveInt(value: unknown): number | undefined {
  */
 export function isVisualModelId(id: string): boolean {
   return /-VL-/i.test(id) || /-VL$/i.test(id)
+}
+
+/**
+ * 目录标了「不能收图」、但 wire 实测**能收图**的主模型（大小写不敏感）。
+ *
+ * ## 为什么需要覆盖表（上游 `dsh-workbuddy-trae-qoder-connect` 仓库 2026-11-05 实测）
+ *
+ * `/v1/model/builtin` 把 `deepseek-v4.1-flash` 与 `deepseek-v4.1-flash-1017`
+ * 标成 `supports_images: false`，但同账号同签名只换图片输入实测 200 且能
+ * 正确描述颜色（`glm-5.3` 对照组 406 `not multimodal`）。而宿主的图片准入
+ * 只看目录声明的模态：标 false ⇒ 声明 `['text']` ⇒ 图在**入库阶段**就被换成
+ * 占位文字，请求根本发不出去（「能选不能发」）。
+ *
+ * ⚠️ 只影响「能不能收图」**这一件事**；**不进** `isVisualModelId` 那张语义
+ * （VL 模型不进对话目录、由 analyzeImage 两段式间接调用），把主模型塞进
+ * VL 判据会改变它们的目录可见性 —— 两张表必须分开。
+ *
+ * ⚠️ 真实账号的收图验收单列 `docs/ACCEPTANCE.md`，夹具测试只锁判据本身。
+ */
+export const CODEARTS_IMAGE_CAPABLE_OVERRIDES: ReadonlySet<string> = new Set([
+  'deepseek-v4.1-flash',
+  'deepseek-v4.1-flash-1017',
+].map((id) => id.toLowerCase()))
+
+/**
+ * 该 CodeArts 模型能否接收图片输入 —— **目录声明与实测覆盖表取并集**，
+ * 这是本渠道图片能力的唯一判据，调用方（`llm-adapter.ts` 的模态声明）
+ * 不要再复制判据（同 `isVisualModelId` 的两处漂移教训）。
+ *
+ * @param id - 模型 id（大小写不限）。
+ * @param model - 目录解析产物（带上游 `supports_images` 时用）；兜底路径无目录条目。
+ */
+export function isCodeArtsImageCapable(
+  id: string,
+  model?: Pick<RemoteModel, 'supportsImages'>,
+): boolean {
+  return CODEARTS_IMAGE_CAPABLE_OVERRIDES.has(id.toLowerCase()) || model?.supportsImages === true
 }
 
 /** 从 JSON 响应中沿路径指针取数组。 */

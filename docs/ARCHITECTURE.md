@@ -62,11 +62,13 @@ vendor 中保留来源快照用于比对；构建只跟随真实 import 图，�
 
 上游来源（用于比对与追溯）：
 
-| vendor | 上游仓库 | 基线提交 |
-|---|---|---|
-| `vendor/ofm/src/` | `https://github.com/Ebony-Vinyl/dsh-our-free-model` | `5923ebef0f55578ca21bb5555b7ba5adb51aef21` |
-| `vendor/connect/` | `https://github.com/chengshenyangtai/dsh-workbuddy-trae-qoder-connect` | `3738a114f121d8198ceeaf6e02763eb97a2fc109` |
-| Qoder 目录解析器参考 | `https://gitee.com/iJetLi/deepseek-harness-codearts` | `9719ccffb975d18df32ac17948d46938c3b5e6fd` |
+| vendor | 上游仓库 | 基线提交 | 活基准（2026-11-08 复核） |
+|---|---|---|---|
+| `vendor/ofm/src/` | `https://github.com/Ebony-Vinyl/dsh-our-free-model` | `5923ebef0f55578ca21bb5555b7ba5adb51aef21` | `qoder-adapter` / `trae-*` / `loomy-*` / `gemini-*` / 账号池 / 签到 / SSE 共享层仍在上游 `vendor/channel-pack/src/` 演进，继续按月比对该子树 |
+| `vendor/connect/` | `https://github.com/chengshenyangtai/dsh-workbuddy-trae-qoder-connect` | `3738a114f121d8198ceeaf6e02763eb97a2fc109` | **已停更**（最后提交 2026-10-21），且基线提交已不在上游历史（历史重写过）；`cosy.js` 的协议要点以快照为准，后续变更参考 iJetLi 仓库的 Qoder 笔记 |
+| Qoder 目录解析器参考 | `https://gitee.com/iJetLi/deepseek-harness-codearts` | `9719ccffb975d18df32ac17948d46938c3b5e6fd` | **持续活跃**（基线以来 400+ 提交，真机协议笔记详尽） |
+
+**基准迁移（2026-11-08 月度审查发现）**：OFM 上游已把 `buddy-adapter` / `buddy-auth` / `llm-adapter`（CodeArts）/ `models` / `service` 等渠道实现**从其源码树移除**（并入不公开源码树的扩展平台），`vendor/channel-pack/src/` 里这些文件从此冻结 —— 它们对应协议（Buddy / CodeArts / 静态模型表）的后续修复**只会**出现在 iJetLi 参考仓库，月度比对对这些文件以 iJetLi 为准。OFM 子树继续作为 Qoder / Trae / Loomy / Gemini / 账号池 / 签到 / SSE 共享层的活基准。
 
 逐文件哈希清单已移除：它没有消费方（没有脚本或 CI 读取），且实测从首次提交起就与磁盘文件不符（114 个条目中 59 个不一致，含从未改动过的文件），继续维护只会产生「看起来在核对、其实早已漂移」的假安全感。**本地改动以验收记录为准**（`docs/ACCEPTANCE.md` 逐条写明改了什么、为什么、如何验证），比一组对不上的哈希可读且可审计。
 
@@ -93,6 +95,13 @@ vendor 中保留来源快照用于比对；构建只跟随真实 import 图，�
 | `vendor/ofm/src/llm-adapter.ts` | 私有 `isAuthError` 改为调用 `isCodeArtsAuthFailure` 的薄封装 | 消除聊天与目录两路径的判据漂移：同一个 APIG.0602 一边自愈、一边被吞，正是 2026-10-29 目录报障的根因 | 同上「catalog and chat paths share the same auth-failure predicate」 |
 | `vendor/ofm/src/codearts-credits.ts` | `parseCreditBalance` 把 `usageTotalPackageCredit`（总积分包）只用作 `CreditBalance.total` 的锚点，不再 push 进 `packages` | 它是三条分类（基础/按需/赠送）的**合计**，宿主合约是「`total` = 各有效包剩余之和」，进包列表就被再求和一次 —— 卡片总额 ≈ 两倍（实测 8506.86 显示成 17013.72） | `tests/codearts-credits.test.mjs` 6 项；`docs/ACCEPTANCE.md` 2026-10-30 |
 | `vendor/ofm/src/buddy-adapter.ts` | `BuddyAdapterOptions` 新增可选 `rewriteSystem` 钩子；在系统消息组装完成、指纹改写**之后**调用，按「全量替换」语义改写 system 消息并去掉重复项 | Buddy 国区正常对话被上游以 `code 11128 Illegal API invocation from an unapproved channel` 拒绝，实测触发点在系统提示词。模板与「换不换」的策略归 `src/`（`src/system/`）维护，vendor 只留一个最小接线点，避免本地策略长进固定版本快照 | `tests/buddy-system.test.mjs` 13 项；`tests/host.test.mjs` 的 Buddy 段（整篇替换、模型槽位、用户内容不变）；真实推理验收见 `docs/ACCEPTANCE.md` 2026-10-28 |
+| `vendor/connect/cosy.js` | `buildCosyHeaders` 增加可选第 4 参 `overrides`，`overrides.cosyVersion` 同时覆盖 `Cosy-Version` 头与签名载荷里的 `cosyVersion`（两处同值、同一次签名覆盖；缺省恒为 `COSY_VERSION`） | 上游按每模型 `minimal_version` 闸门裁剪目录（`vendor/ofm/src/qoder-catalog.ts` 实测表），声明版本落后时新模型被静默裁掉；目录平面的声明版本需要可被探测策略（`src/core/declared-version.ts`）动态覆盖。推理平面（`qoder-wasm.ts` 自带 1.1.49）不经此处，不受影响 | `tests/declared-version.test.ts` 8 项；`tests/host.test.mjs` 的版本闸门夹具（采纳 → 回滚端到端）；真实账号验收单列 `docs/ACCEPTANCE.md` 2026-11-08 |
+| `vendor/ofm/src/buddy.ts` | `isChatModel` 的生成类任务判据泛化为**模态转换 tags 家族**：`tags` 匹配 `*-to-image` / `*-to-video`（覆盖 text-to-image / image-to-image / text-to-video / image-to-video），或条目携带 `videoGeneration` 配置块 | 实测（buddy 与 workbuddy 两渠道 scoped + `/v3/config`）：`kling-video-v3` / `minimax-video-h3`（视频）、`hunyuan-image-alpha`（文生图）、`hunyuan-image-alpha-edit`（图像编辑，`image-to-image`）都**不在**官方 cli/craft 对话 agent 引用清单里，靠「补齐 data.models」路径混进对话菜单；它们不下发 credits 系数、走各自任务通道，对话端点不认（用户报障「workbuddy 解出来好几个没有系数的模型」及「Hunyuan Image Alpha Edit 呢」） | `tests/buddy-catalog.test.mjs` 3 项（视频/图像编辑滤出、正常计费模型系数不丢、无系数但对话形状齐全的模型保留）；真实目录证据见 `docs/ACCEPTANCE.md` 2026-11-08 |
+| `vendor/ofm/src/qoder-adapter.ts` | ① `qoderEffortsFor` 结果按**强度序稳定重排**（新增 `sortEffortsByStrength`，强度表复用既有 `vendor/ofm/src/reasoning-ladder.ts` 的 `REASONING_EFFORT_RANK`，未登记 id 排末尾、保持原相对顺序）；② SSE 流内排队错误加 `emittedAnyChunk` 守卫：**已向下游发出片段后不再等待重放**，直接抛错；③ `waitForQueue` 单次等待钳制在剩余预算内（`min(requested, deadline-now)`），服务端给 0 时保底 100ms，醒来后立即复判 deadline | ① 目录键序是采集序（实测 `dfmodel` 为 `high/max/low`），官方客户端拿到后会按强度重排（CN 0.4.8 asar `displayReasoningEfforts()` 取证）；不排则「位置=强度」的 UI 把「最大」画在「高」左边、把「关闭思考」点亮满格。② 已出字后重放整条请求会让下游收到重复正文/工具调用——「排队先于首帧」与「流中排队」两种形态此前被混为一谈。③ 长的 Retry-After 可以一次等过 deadline，醒来还带一个注定超时的重放再跑一轮；0 延迟会退化成忙循环 | ① `tests/qoder-efforts.test.mjs` 6 项；②③ `tests/qoder-queue.test.mjs` 4 项（钳制、100ms 地板、醒来即超时、过期不等待）；上游来源 OFM `4cf67d3` 前后的 channel-pack 提交，证据见 `docs/ACCEPTANCE.md` 2026-11-08（上游审查批次） |
+| `vendor/ofm/src/sse.ts` | `normalizeToolArguments` / `isTruncatedArguments` 区分「**结构不完整**」与「**结构完整但语法非法**」：解析失败后再扫字符串/转义状态与括号深度，只有 `inString || depth !== 0` 才算截断（补 `{}`）；语法非法的原样返回 | 只把「无法解析」一律当截断会把模型输出错误的参数伪造成合法 `{}`：harness 报 missing required property 而模型收不到真实病因，且「已达到输出上限」的提示失真、恢复路径失效（上游 issue #474） | `tests/sse-truncation.test.mjs` 5 项（未闭合字符串、负深度、结构完整语法非法、原样透传、既有契约不变） |
+| `vendor/ofm/src/openai-compat.ts` | `consumeOpenAiSse` 的 finally 在 `releaseLock()` 前先 `await reader.cancel().catch(() => {})` | `releaseLock` 不会终止上游：生成器提前退出（异常、下游中止、止损 break）时连接挂到对端掐断为止；换号重发还会让旧流与新流并存 | 既有 SSE 套件（`tests/qoder-errors.test.mjs`）回归通过；行为与上游 `openai-compat.ts` 逐行一致，未单独夹具 |
+| `vendor/ofm/src/models.ts`、`llm-adapter.ts` | `RemoteModel` 增加 `supportsImages`（目录 `supports_images` 宽容透传）；新增 `CODEARTS_IMAGE_CAPABLE_OVERRIDES`（`deepseek-v4.1-flash` / `-1017`，大小写不敏感）与共享判据 `isCodeArtsImageCapable`（覆盖表 ∪ 目录声明）；`listModels` 与 `resolveModel`/`prepareCall` 按"能收图 ⇒ `['text','image']`，否则 `['text']`"声明模态（`prepareCall` 不再硬编码 `['text']`） | 宿主 `dsh-llm` 以 `inputModalities` 含 `image` 为图片准入唯一开关；`/v1/model/builtin` 把两个 flash 主模型标成 `supports_images: false`，但 2026-11-05 wire 实测它们能收图（对照组 `glm-5.3` 406 `not multimodal`）——目录会过期，声明 `['text']` 会让图在入库阶段被换成占位文字（「能选不能发」）。VL 判据（`isVisualModelId`）与覆盖表**分开**：主模型塞进 VL 表会改变目录可见性 | `tests/context-report.test.mjs` 4 项（目录透传、覆盖表大小写不敏感、并集语义、非覆盖模型不放行）；**真实账号收图验收未做**，见 `docs/ACCEPTANCE.md` 2026-11-08（上游审查批次） |
+| `vendor/connect/cosy.js` | `COSY_VERSION` 基线 `1.1.38` → `1.1.79` | 官方 IDE 0.5.6 的 run manifest 自称 `cli_version = 1.1.79-hotfix.18`；参考实现真机实测 `fast` 闸门为 `{app: 1.1.66, cli: 1.1.70}` 且目录在 1.1.70 封顶（1.1.79 与其逐条相同）。取 1.1.79 不带预发布后缀（semver 预发布低于同位正式版）。此常量是探测策略的基线与回滚目标；推理平面 `qoder-wasm.ts` 的 1.1.49 不动 | `tests/host.test.mjs` 版本闸门夹具随基线抬到 1.1.80，端到端采纳/回滚 3 项通过；真实账号目录与推理复核单列 `docs/ACCEPTANCE.md` 2026-11-08（上游审查批次） |
 
 ## 边界
 

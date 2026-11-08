@@ -5,7 +5,7 @@ import type { Account } from "../src/core/types.ts";
 
 function fixture(claim: (a: Account) => Promise<any>, mode: "auto" | "manual" | "unsupported" = "auto") {
   let now = Date.parse("2026-10-21T01:00:00+08:00");
-  const accounts: Account[] = [{ id: "one", provider: "qoder", credentialRef: "REF", nickname: "Synthetic", enabled: false }];
+  const accounts: Account[] = [{ id: "one", provider: "qodercn", credentialRef: "REF", nickname: "Synthetic", enabled: false }];
   const values = new Map<string, any>();
   let updates = 0;
   const options = {

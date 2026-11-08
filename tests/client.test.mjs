@@ -981,7 +981,7 @@ test("the extended-context switch only renders for channels that declare it", ()
       extendedContext: { supported: true, enabled: false },
       accounts: [],
     },
-    { id: "qoder", name: "Qoder", selectedAccountId: null, accounts: [] },
+    { id: "qodercn", name: "Qoder CN", selectedAccountId: null, accounts: [] },
   ]);
   const toggles = nodes(withTier).filter(
     (n) => n.props?.className === "chub-context-toggle",

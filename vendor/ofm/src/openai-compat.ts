@@ -917,6 +917,10 @@ export async function* consumeOpenAiSse(
       }
     }
   } finally {
+    // releaseLock 不会终止上游：生成器提前退出（异常、下游中止、止损 break）
+    // 时必须先取消响应再释放锁，否则连接挂到对端掐断为止，换号重发还会
+    // 让旧流与新流并存（上游 2026-10-27 修，随 issue #474 批次移植）。
+    await reader.cancel().catch(() => {})
     reader.releaseLock()
   }
 
