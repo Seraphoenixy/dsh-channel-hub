@@ -58,7 +58,7 @@ test("解析成功但无可读字段时退回原文，而不是静默只剩状�
   assert.match(text, /unexpected/);
 });
 
-test("长响应体被截断，不会把整页塞进读数", () => {
+test("长响应体被截断，不会把整页写入读数", () => {
   const huge = "x".repeat(5000);
   assert.ok(describeHttpFailure("目录", 500, huge).length < 400);
 });

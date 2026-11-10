@@ -21,7 +21,7 @@ import {
  * 目录拉取路径此前没有接聊天路径早已有的「鉴权失败 → 静默续期 → 重试」
  * 自愈 —— `firstUsableCredential` 只看 AK/SK 存在、不看 expires_at，
  * 过期凭据照样签名发出；APIG.0602 被当成普通失败吞掉，目录变空列表。
- * 这里用夹具钉死修复后的完整链路。
+ * 这里用夹具锁定修复后的完整链路。
  *
  * 与真实网络验收的分工（AGENTS.md）：夹具不联网、不读真实账号，只锁
  * 协议编排；真实凭据验收单独记载于 docs/ACCEPTANCE.md。
@@ -451,7 +451,7 @@ test("catalog and chat paths share the same auth-failure predicate", async () =>
  *
  * 这里锁四件事：① 判据把「忙」排除出鉴权；② 聊天路径不续期、短退避后
  * 按 `SERVER` 如实上抛，文案带 error_code；③ 目录路径对瞬时忙容忍、对
- * 非鉴权 403 上抛（不能吞成空目录）；④ 真鉴权形态（APIG.0301 /
+ * 非鉴权 403 上抛（不能记录为空目录）；④ 真鉴权形态（APIG.0301 /
  * APIG.0602 / 空体 403）仍然命中，不能因收紧 403 而漏掉自愈。
  */
 
@@ -534,7 +534,7 @@ test("directory surfaces a non-auth 403 instead of emptying the catalog", async 
     ),
     (error) => {
       // 权限/禁用类 403 不是鉴权失败：不能续期（无效动作），但必须可见 ——
-      // 吞成空列表会让模型菜单被一条空快照清空且没有任何错误提示。
+      // 记录为空列表会让模型菜单被一条空快照清空且没有任何错误提示。
       assert.ok(!(error instanceof CodeArtsCatalogAuthError));
       assert.match(error.message, /HTTP 403/);
       assert.match(error.message, /TM\.00001005/);

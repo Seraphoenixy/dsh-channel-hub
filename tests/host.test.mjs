@@ -183,11 +183,11 @@ test(
        * 「更新模型」现在是区块级动作（不带 `provider` ⇒ 全部渠道）。
        *
        * 夹具的 fetch 恒抛错，于是 CodeBuddy 的账号目录必然失败，而其余没有
-       * 账号的渠道「无事可做」。要求：**部分失败不抛错**，逐个点名失败渠道，
+       * 账号的渠道「无事可做」。要求：**部分失败不抛错**，逐个列出失败渠道，
        * 成功的渠道照常计入 —— 界面才能说出「已更新 N/M」而不是笼统失败。
        *
-       * ⚠️ 这里同时锁住「快照 error 也算失败」：`driver.reload()` 把上游失败
-       * 吞成 `{stale: true, error}` 的快照并正常 resolve，只看 Promise 的
+       * ⚠️ 这里同时锁定「快照 error 也算失败」：`driver.reload()` 把上游失败
+       * 记录为 `{stale: true, error}` 的快照并正常 resolve，只看 Promise 的
        * rejected 会把满盘皆错报成「全部更新成功」。
        */
       const bulk = await plugin.dispatch("models.refresh", {});
@@ -561,7 +561,7 @@ test(
         const version = headers.get("Cosy-Version") ?? "";
         if (qoderBreakAdopted && version !== "1.1.79")
           // 形状级失败：HTTP 200 但没有任何场景数组 —— discover 据此判定
-          // 「该版本真的不被支持」并清除采纳；探测轮则按瞬态处理不拉黑。
+          // 「该版本真的不被支持」并清除采纳；探测轮则按瞬态处理、不记为拒绝。
           return Response.json({ unexpected: true });
         return Response.json({
           chat: [
@@ -685,8 +685,8 @@ test(
        * 结果行否认已发生的事实。现在要求：
        * 1. `refreshedAccounts` 把成功账号数如实回报（成功账号计入，
        *    workbuddy 的坏账号不计）；
-       * 2. `partial` 点名该渠道「成功/总数」（`workbuddy: "1/2"`）；
-       * 3. `failures` 照旧点名坏账号的快照错误；
+       * 2. `partial` 列出该渠道「成功/总数」（`workbuddy: "1/2"`）；
+       * 3. `failures` 照旧逐条列出坏账号的快照错误；
        * 4. 桶互斥性以**渠道**口径维持（refreshed + failures + skipped =
        *    total）—— 部分失败渠道归入 failures 桶，其成功账号只进
        *    `refreshedAccounts`，两套口径不混。
@@ -764,6 +764,88 @@ test(
         geminiCall.context?.contextWindow,
         1_000_000,
         "the Gemini static window must reach the host",
+      );
+      /**
+       * 全局「输入预算」：保存后宿主解析模型时拿到的窗口按该模型的输出预留
+       * 反算并收紧；`channels.list` 的展示副本保留上游原值，**目录快照本身
+       * 不变**（快照是审计依据）。
+       */
+      assert.equal(
+        (await plugin.dispatch("settings.get")).contextBudget,
+        null,
+        "the budget must default to following upstream",
+      );
+      await plugin.dispatch("channels.setContextBudget", { budget: 524_288 });
+      const budgeted = await llm.prepareCall({
+        provider: "channel-hub/gemini",
+        model: "gemini-3.8-flash",
+      });
+      const budgetedWindow = budgeted.context?.contextWindow;
+      assert.ok(
+        typeof budgetedWindow === "number" &&
+          budgetedWindow > 524_288 &&
+          budgetedWindow < 1_000_000,
+        "the budget must shrink the reported window without inflating it: " +
+          String(budgetedWindow),
+      );
+      // 自动压缩读的是 `resolveModelInfo`（不是 prepareCall），这条路径也必须
+      // 拿到同一个收紧后的窗口。
+      assert.equal(
+        (await llm.resolveModelInfo("channel-hub/gemini", "gemini-3.8-flash"))
+          .context?.contextWindow,
+        budgetedWindow,
+        "the compaction path must see the same limited window",
+      );
+      /**
+       * 展示副本用的是**目录字段**（`maxOutputTokens` / `maxTokens`）反算，
+       * 宿主请求路径用适配器的 `defaultMaxTokens`（Gemini 是静态表的
+       * 64000），两者在个别渠道本就不同 —— 故只要求「被收紧且不超过上游」。
+       *
+       * 另：目录条目**没有**声明窗口的模型（Gemini 真实目录即如此）在展示层
+       * 无从反算，`upstreamContextWindow` 保持缺省；宿主侧仍按静态表容量钳制。
+       */
+      const qoderList = (await plugin.dispatch("channels.list")).find(
+        (c) => c.id === "qodercn",
+      ).accounts[0].catalog.models;
+      const dfmodel = qoderList.find((m) => m.id === "dfmodel");
+      assert.equal(
+        dfmodel.upstreamContextWindow,
+        1_000_000,
+        "the display copy must keep the upstream window for auditing",
+      );
+      assert.ok(
+        dfmodel.contextWindow > 524_288 && dfmodel.contextWindow < 1_000_000,
+        "the display copy must reflect the budget: " +
+          String(dfmodel.contextWindow),
+      );
+      assert.ok(
+        dfmodel.estimatedCompactionTokens > 0,
+        "the display copy must carry the estimated compaction point",
+      );
+      const geminiDisplay = (await plugin.dispatch("channels.list")).find(
+        (c) => c.id === "gemini",
+      ).accounts[0].catalog.models[0];
+      assert.equal(
+        geminiDisplay.upstreamContextWindow,
+        undefined,
+        "a directory without a declared window has nothing to clamp in the view",
+      );
+      await assert.rejects(
+        plugin.dispatch("channels.setContextBudget", { budget: 300_000 }),
+        /不支持的输入预算档位/,
+        "arbitrary numbers must be rejected: they can leave no message budget",
+      );
+      // 复位，后续断言按上游窗口继续。
+      await plugin.dispatch("channels.setContextBudget", { budget: null });
+      assert.equal(
+        (
+          await llm.prepareCall({
+            provider: "channel-hub/gemini",
+            model: "gemini-3.8-flash",
+          })
+        ).context?.contextWindow,
+        1_000_000,
+        "clearing the budget restores the upstream window",
       );
       const catalog = await llm.listModels("channel-hub/qodercn");
       // 基线 = chat 场景的 dfmodel + app 场景独有的 lmodel（QoDuck，无版本闸门）。

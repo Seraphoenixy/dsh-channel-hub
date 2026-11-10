@@ -20,7 +20,7 @@ import { makeImageRequestBridge } from "../src/drivers/ofm.js";
  * （`src/drivers/ofm.js`）从 vendor 原入口改造时**只桥接了 `readImage`
  * （原图），漏了 `readImageRequest`（缩放投影）** —— `projectRequestImage`
  * 第一行 `readImageRequest === undefined` 直接返回，于是每张图都按原始
- * 字节内联。两层夹具分别锁住「适配器在拿到桥接后会走投影」与
+ * 字节内联。两层夹具分别锁定「适配器在拿到桥接后会走投影」与
  * 「驱动真的把桥接递给了每个适配器」。
  *
  * 与真实网络验收的分工（AGENTS.md）：夹具不联网、不读真实账号。
@@ -108,7 +108,7 @@ test("raccoon adapter projects images through the request bridge instead of send
 
 test("raccoon adapter falls back to raw bytes when the projection is unavailable", async () => {
   // 投影不可用（老宿主）：回退 readImage 原图 —— 保守方向正确（宁可发大图，
-  // 不能因「想缩图」打死请求）。这正是驱动层漏桥接时每个请求的实际行为，
+  // 不能因「想缩图」使请求失败）。这正是驱动层漏桥接时每个请求的实际行为，
   // 也是本次 413 报障的直接机制。
   const raw = { data: fakeImage(7 * 1024 * 1024), mediaType: "image/png" };
   const { adapter } = raccoonFixture({ projected: undefined, raw });
@@ -196,8 +196,8 @@ test("every driver forwards readImageRequest to its adapter options", async () =
 
 test("raccoon image budget leaves headroom under the 10MB gateway limit", () => {
   // 每张 ≤512KB（编码后），base64 膨胀 4/3 ≈ 683KB/张：10 张 ≈ 6.7MB < 10MB；
-  // 15 张才越界。预算把「几张大图顶穿上限」换成「极端张数才触顶」——
-  // 报障会话顶穿的直接原因就是没走投影、原图直发。
+  // 15 张才越界。预算把「几张大图超出上限」换成「极端张数才达到上限」——
+  // 报障会话超出上限的直接原因就是没走投影、原图直发。
   const perImageBase64 = (RACCOON_REQUEST_IMAGE_MAX_BYTES * 4) / 3;
   assert.ok(perImageBase64 * 10 < 10 * 1024 * 1024, "10 projected images must stay under the 10MB cap");
   assert.ok(

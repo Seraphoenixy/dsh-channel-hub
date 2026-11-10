@@ -2,7 +2,7 @@
  * 额度查询失败原因的归一化（`vendor/ofm/src/credits.ts` 的 `describeCreditFailure`）。
  *
  * 这个函数是所有渠道共用的：它的目标只有一个 —— **别把上游已经说清楚的
- * 原因弄丢**。真实故障背景：LobsterAI 账号被禁用，上游返回
+ * 原因丢失**。真实故障背景：LobsterAI 账号被禁用，上游返回
  * `{"code":40302,"message":"账号已被禁用"}`，旧实现只 `return null`，
  * 界面显示「凭据失效或响应异常」，把用户引向「重新登录」这个无效动作。
  */
@@ -30,7 +30,7 @@ test("非 JSON 响应保留一段原文，而不是只说状态码", () => {
   assert.match(text, /401 Authorization Required/);
 });
 
-test("响应体为空时给出状态码；401/403 单独点名「凭据或账号被拒」", () => {
+test("响应体为空时给出状态码；401/403 单独给出「凭据或账号被拒」", () => {
   assert.equal(describeCreditFailure(503, ""), "额度查询失败（HTTP 503）");
   assert.match(describeCreditFailure(401, ""), /凭据或账号被拒/);
   assert.match(describeCreditFailure(403, ""), /凭据或账号被拒/);
@@ -43,7 +43,7 @@ test("状态码未知时用调用方给的兜底说明", () => {
   );
 });
 
-test("片段长度受限，避免把整页 HTML 塞进读数", () => {
+test("片段长度受限，避免把整页 HTML 写入读数", () => {
   const huge = "x".repeat(5000);
   assert.ok(describeCreditFailure(500, huge).length < 400);
 });

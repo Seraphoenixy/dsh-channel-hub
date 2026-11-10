@@ -421,12 +421,20 @@ export class Observer {
           }
         };
         const finish = async (outcome: Attempt["outcome"], error?: unknown) => {
-          if (a.outcome !== "failed" || outcome !== "success")
-            a.outcome = outcome;
+          // ⚠️ **结局一经定稿不再改判**（只有 running 可以迁移一次）：收尾
+          // 阶段存在一条竞态（见下面 `pull` 的 `catch`），会把已经成功的一次
+          // 应答再写成 failed；一旦覆盖，`measure()` 的速度与整块吞吐（都要求
+          // 最后一条 attempt 为 success）会**同时**失去样本 —— 运行日志表现为
+          // 「结果 success、首字有值、两列都是 —」（真实缺陷，2026-11-10
+          // qodercn 实例）。反向同样不允许：业务错误帧已经把 attempt 定为
+          // failed 时，正常 EOF 不能把它洗成 success。
+          if (a.outcome === "running") a.outcome = outcome;
           a.ended = Date.now();
           if (error) a.error = redact(error);
           await this.write("attempt", a);
         };
+        /** 消费方是否已经取消过本响应体（收尾竞态的判据，见 `pull`）。 */
+        let cancelled = false;
         const body = new ReadableStream<Uint8Array>({
           pull: async (controller) => {
             try {
@@ -434,7 +442,9 @@ export class Observer {
               if (next.done) {
                 scan();
                 await finish("success");
-                controller.close();
+                // 取消可能发生在 `finish` 的 await 期间：此时控制器已关闭，
+                // 再关闭一次会抛 `Invalid state: Controller is already closed`。
+                if (!cancelled) controller.close();
               } else {
                 scan(next.value);
                 controller.enqueue(next.value);
@@ -443,11 +453,23 @@ export class Observer {
               // ⚠️ 这里的 abort 可能只是**适配器主动释放连接**（读到 finish
               // 就 return，上层随之 cancel body），也可能是真的被取消。区分
               // 依据是调用方 signal —— 只有它才是"用户取消"。
+              //
+              // ⚠️ 还有第三种：**本次 pull 的 await 期间消费方已 cancel**，
+              // 控制器随之关闭，随后的 close()/enqueue() 抛
+              // `Invalid state: Controller is already closed`。那是本插件的
+              // 收尾竞态，不是上游故障：此时 attempt 已经定稿（cancel 回调或
+              // 上面的 `finish("success")` 写入过结局），不能再改判失败。
+              if (cancelled || a.outcome !== "running") return;
               await finish(init?.signal?.aborted ? "cancelled" : "failed", e);
-              controller.error(e);
+              try {
+                controller.error(e);
+              } catch {
+                /* 控制器已关闭：上面的结局已经落库 */
+              }
             }
           },
           cancel: async (reason) => {
+            cancelled = true;
             // ⚠️ **不要把 cancel 一律记成 cancelled**（真实缺陷，2026-10-21）：
             // 适配器正常收尾（拿到 finish 帧后停止读取）也会走到这里，那不是
             // 失败也不是取消 —— 记成 cancelled 会让日志里全是看不懂的

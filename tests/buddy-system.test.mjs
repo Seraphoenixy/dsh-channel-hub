@@ -64,7 +64,7 @@ const drain = async (iterable) => {
   }
 };
 
-test("模板正文钉死为已验收的字节，且只有一处模型槽位", () => {
+test("模板正文锁定为已验收的字节，且只有一处模型槽位", () => {
   // 正文的唯一来源就是 `buddy-prompt.ts` 里的模板字面量；这份指纹是逐字对照
   // 上游拦截规则定下来的，改动必须同步重跑真实网络验收，不能只改测试放行。
   const sha = createHash("sha256")
@@ -77,7 +77,7 @@ test("模板正文钉死为已验收的字节，且只有一处模型槽位", ()
   );
   assert.equal(BUDDY_SYSTEM_MODEL_SLOT, "{{MODEL_ID}}");
   assert.equal(BUDDY_SYSTEM_ZH.split(BUDDY_SYSTEM_MODEL_SLOT).length, 2);
-  // 结尾换行参与指纹，单独点名，避免有人「顺手」格式化掉。
+  // 结尾换行参与指纹，单独列出，避免后续维护时被格式化工具移除。
   assert.ok(BUDDY_SYSTEM_ZH.endsWith("\n"));
 });
 

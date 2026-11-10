@@ -3,7 +3,7 @@
  *
  * **本文件是该正文的唯一来源。** 改文案直接改下面的模板字面量；正文必须逐字
  * 稳定（`prompt_cache_key` 的前缀缓存要求同一模型每轮发同一份文本），所以
- * `tests/buddy-system.test.mjs` 用 sha256 钉死了当前字节：
+ * `tests/buddy-system.test.mjs` 用 sha256 锁定了当前字节：
  *
  * - 长度 3412 字符（含结尾换行）
  * - sha256 `347ef45a50cec8fc8d8ae6359be760896cc64feb82fbc3c168318a3e88495f3b`

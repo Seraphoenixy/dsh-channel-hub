@@ -14,6 +14,11 @@ import { MigrationService } from "./migration.ts";
 import { redact, type Account, type Filter } from "./core/types.ts";
 import { creditReading } from "./core/credits.ts";
 import {
+  CONTEXT_BUDGET_HEADROOM,
+  CONTEXT_BUDGET_TIERS,
+  displayLimitedModel,
+} from "./core/context-limit.ts";
+import {
   orphanAccounts,
   purgeAccountCredential,
   purgeAccountSnapshots,
@@ -49,7 +54,7 @@ export async function apply(ctx: any) {
    * 2. `unset` **没被列出** → 落到下面的兜底分支，`bind(target)` 后直接用
    *    **未加前缀**的 ref 调用，删的是 `ACCOUNT_x` 而非
    *    `CHANNEL_HUB_…_ACCOUNT_x`。宿主对不存在的键是 no-op，所以厂商
-   *    `removeAccount()` 里的注销**一直在静默空转**，凭据永久留在
+   *    `removeAccount()` 里的注销**一直静默无效执行**，凭据永久留在
    *    `.credentials.yaml` 里（实测某 profile 残留 7 份已删账号的凭据）。
    *
    * 因此这里列全**按 ref 寻址**的方法：`resolve` / `describe` / `set` / `unset`。
@@ -161,6 +166,14 @@ export async function apply(ctx: any) {
   const dispatch = async (method: string, p: any = {}) => {
     if (method === "channels.list") {
       const accounts = await engine.pool.listAllAccounts();
+      /**
+       * 全局输入预算（`null` = 跟随上游）。
+       *
+       * ⚠️ 展示侧按它钳制目录窗口，但不修改已存快照：快照保留上游真值，
+       * 便于审计「限制值」与「上游值」的差异（模型行会同时给出两者）。
+       * 权威值由 `resolveModel` 用适配器的输出预留另行反算。
+       */
+      const budget = engine.contextBudget.get() ?? undefined;
       return Promise.all(
         [...engine.drivers.values()].map(async (d: any) => ({
           id: d.id,
@@ -196,6 +209,7 @@ export async function apply(ctx: any) {
               .filter((a: Account) => a.provider === d.id)
               .map(async (a: Account) => {
                 const balance = await store.call("get", "balance:" + a.id);
+                const snapshot = await catalog.load(d.id + ":" + a.id);
                 return {
                   id: a.id,
                   provider: a.provider,
@@ -210,7 +224,12 @@ export async function apply(ctx: any) {
                   credits: creditReading(balance),
                   balance,
                   catalog: {
-                    ...(await catalog.load(d.id + ":" + a.id)),
+                    ...snapshot,
+                    // 只改**响应副本**：窗口按全局预算钳制，并附上游原值与
+                    // 估算压缩点；`catalog:*` 快照保持上游真值不动。
+                    models: (snapshot.models ?? []).map((m: any) =>
+                      displayLimitedModel(m, budget),
+                    ),
                     disabled: [...engine.pool.disabledModelsFor(d.id)],
                   },
                 };
@@ -238,6 +257,18 @@ export async function apply(ctx: any) {
       // 档位变了 ⇒ 模型的 `context` 与展示名都变，必须让宿主重读目录。
       ctx.emit("llm/adapters-updated");
       return true;
+    }
+    if (method === "settings.get") {
+      return {
+        contextBudget: engine.contextBudget.get(),
+        contextBudgetTiers: CONTEXT_BUDGET_TIERS,
+        contextBudgetHeadroom: CONTEXT_BUDGET_HEADROOM,
+      };
+    }
+    if (method === "channels.setContextBudget") {
+      // `null` = 跟随上游；其余只接受固定档位（校验在 driver 内，单一来源）。
+      await engine.contextBudget.set(p.budget ?? null);
+      return { contextBudget: engine.contextBudget.get() };
     }
     if (method === "login.start") return engine.login(String(p.provider), p);
     if (method === "login.poll") {
@@ -351,20 +382,20 @@ export async function apply(ctx: any) {
     }
     if (method === "models.refresh") {
       /**
-       * 不点名 `provider` ⇒ 更新**全部渠道**（区块工具条的「更新模型」）。
+       * 不指定 `provider` ⇒ 更新**全部渠道**（区块工具条的「更新模型」）。
        *
        * ⚠️ 用 `Promise.allSettled` 而不是 `all`：一个渠道的目录请求抛错（驱动
-       * 异常）不该让其余渠道的目录都白刷。
+       * 异常）不该让其余渠道的目录刷新结果一起作废。
        *
        * ⚠️ **还要看快照里的 `error`**：`driver.reload()` 内部对每个账号调
-       * `catalog.refresh`，它把上游失败**吞成** `{...previous, stale, error}`
+       * `catalog.refresh`，它把上游失败**记录为** `{...previous, stale, error}`
        * 的快照并正常 resolve —— 只看 `rejected` 会把「所有渠道目录都 500」
        * 报成「全部更新成功」。这正是界面最需要说清的场合，故两路都收。
        *
        * ⚠️ **没有账号的渠道不算「已更新」**（2026-10-29 修）。`reload()` 对
        * 空账号列表返回 `[]`，它既没失败也没做事；旧实现把它计进 `refreshed`，
        * 于是 9 个渠道里 7 个没账号时界面显示「已更新 8/9」——用户点完看不到
-       * 任何变化，还以为按钮坏了。现在这类渠道单列成 `skipped`。
+       * 任何变化，会认为按钮失效。现在这类渠道单列成 `skipped`。
        *
        * ⚠️ **部分失败的渠道按账号快照分别计**（2026-10-30 修，用户报障
        * 「更新模型部分失败，也得把成功的那部分状态正确刷新了」）。
@@ -416,7 +447,7 @@ export async function apply(ctx: any) {
           /**
            * 部分失败：成功账号照常计入 `refreshedAccounts`（他们的快照
            * `updated`/新模型已落库，这是事实，结果行不能否认）；失败账号
-           * 点名进 `failures`。全失败的渠道不进 `partial`——它没有任何
+           * 逐个列进 `failures`。全失败的渠道不进 `partial`——它没有任何
            * 成功部分，与普通失败同列即可，避免三态口径重叠。
            */
           if (snapshots.length > failed.length)
@@ -433,7 +464,7 @@ export async function apply(ctx: any) {
         /**
          * 目录声明版本的事件留痕（采纳/回滚，见 `core/declared-version.ts`）。
          * ⚠️ 无论渠道本轮成败都消费：回滚留痕恰恰发生在失败的渠道上，
-         * 只在成功分支收集会把回滚吞掉。
+         * 只在成功分支收集会丢失回滚记录。
          */
         const versionNotes: string[] = [];
         targets.forEach((d: any) => {
@@ -461,8 +492,8 @@ export async function apply(ctx: any) {
         throw Error("disabled must be boolean");
       const provider = String(p.provider);
       if (p.all === true) {
-        // 只支持「全部启用」：全部禁用必须点名当前目录的模型，
-        // 否则会把从未见过的 id 写进黑名单（凭空扩大隐藏范围）。
+        // 只支持「全部启用」：全部禁用必须逐个列出当前目录的模型，
+        // 否则会把从未见过的 id 写进黑名单（无依据地扩大隐藏范围）。
         if (p.disabled) throw Error("all is only valid when enabling models");
         await engine.pool.clearDisabledModels(provider);
       } else if (Array.isArray(p.models)) {
@@ -632,18 +663,17 @@ export async function apply(ctx: any) {
   return Object.assign(stop, { dispatch, stop });
 }
 /**
- * 哪些 `dist/` 产物值得触发一次热重载。
+ * 哪些 `dist/` 产物需要触发一次热重载。
  *
  * ⚠️ `client.js` **必须在列表里**（2026-10-29 补）。原先只监视 `index.js` 与
  * `ledger-worker.js`，于是「只改界面」的一次构建完全不触发任何通知 —— 排查
  * 「改完了但没生效」时，日志里连一条「dist 已更新」都不会出现，看不出该刷新
  * 页面。浏览器侧的样式与组件**只**来自 `client.js`；它由宿主按请求从磁盘读
  * （`frontend-static` 的 `serveStatic` 里是 `readFile`，且响应带
- * `cache-control: no-store`），所以刷新本来就能拿到新产物 —— 但把这件事说
- * 出来（一条日志）才是可诊断的。
+ * `cache-control: no-store`），所以刷新本来就能拿到新产物 —— 但把该行为记录到一条日志中才具备可诊断性。
  *
  * 抽成具名函数是为了能被 `tests/reload.test.ts` 直接断言：写在 `apply` 里的
- * 内联箭头函数，测试只能复刻一份逻辑，而复刻的那份永远不会和真实代码一起腐烂。
+ * 内联箭头函数，测试只能复刻一份逻辑，而副本不会随真实代码一起更新。
  */
 export function isWatchedArtifact(file: string): boolean {
   const normalized = file.replaceAll("\\", "/");

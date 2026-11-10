@@ -3,6 +3,11 @@ import { channelFetch as fetch } from "./user-agent.ts";
 import { rateLabel } from "../core/rate.ts";
 import { extendedTierLabel } from "../core/context.ts";
 import {
+  isContextBudgetTier,
+  limitedContextWindow,
+  normalizeContextBudget,
+} from "../core/context-limit.ts";
+import {
   applyProbeOutcome,
   catalogVersionProbeAtKey,
   effectiveVersion,
@@ -167,7 +172,7 @@ export const streamMeta = (opts) => {
  * **原始字节**。此前本驱动只桥接了 `readImage`、漏了 `readImageRequest`，
  * 于是 `projectRequestImage` 第一行就返回 `undefined` —— 每张图都按原始
  * 分辨率 base64 内联（一张 2560×1600 截图 ≈3-7MB），历史里每轮全量重发，
- * 两三张就顶穿 raccoon 的 10MB 请求体上限（账本实证：同一会话连续 17 轮
+ * 两三张就超出 raccoon 的 10MB 请求体上限（账本实证：同一会话连续 17 轮
  * 成功后从某轮起连报 `request body exceeds 10MB`）。vendor 原入口
  * （`vendor/ofm/src/index.ts` 的 `makeReadImageRequest`）给每个适配器都
  * 桥了这一项，本驱动从它改造时丢了。
@@ -178,7 +183,7 @@ export const streamMeta = (opts) => {
  * 1. 宿主没装附件服务，或该版本没有 `readImageRequest`（老契约）；
  * 2. 投影结果缺 mediaType（形状不认识）；
  * 3. 派生过程抛错（缓存不可写、字节校验失败…）—— 缩放是优化，
- *    不能因为「想缩图」把一次本来能成功的请求打死。
+ *    不能因为「想缩图」把一次本来能成功的请求变成失败。
  */
 export const makeImageRequestBridge = (ctx) => async (attachment, target) => {
   const service = ctx.get?.("attachments");
@@ -220,7 +225,7 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
             const body = await response.clone().json();
             // 复用同一次目录请求：`/v3/config` 的 `data.modelPromotions` 带
             // 折扣时段与角标（夜间免费 / 夜间半价一类），OFM 只取其中「此刻
-            // 折后价」，把时段丢掉了。这里顺手留下响应体，供本渠道附加
+            // 折后价」，把时段丢掉了。这里一并留下响应体，供本渠道附加
             // `promotion` 展示字段 —— 不新增端点、不重复请求。
             const url =
               typeof input === "string" ? input : (input?.url ?? String(input));
@@ -240,6 +245,15 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
     drivers = new Map(),
     pending = new Map();
   const selection = new AccountSelection(store, (id) => pool.findAccount(id));
+  /**
+   * 全局「单次请求输入预算」（`undefined` = 跟随上游）。
+   *
+   * ⚠️ **不是**渠道级开关：DSH 的容量只来自适配器上报的 `contextWindow`，
+   * 限制只有「按模型反算窗口」一种落法（见 `core/context-limit.ts` 的换算
+   * 说明）。这里只保存一个值，`visible()` / `resolveModel()` 现读，
+   * 因此保存后下一次解析即生效，无需重建适配器。
+   */
+  let contextBudget;
   const read = async (a) => {
     const v = await ctx.credentials.resolve(a.credentialRef);
     return v ? parse(v.value) : undefined;
@@ -384,7 +398,7 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
           return { data: v.data, mediaType: v.ref?.mediaType ?? v.mediaType };
         },
         // 缩放投影（见 createDrivers 顶部的 imageRequestBridge 注释）：
-        // 没有它，每张图都按原始字节内联，raccoon/qoder 的请求体上限必被顶穿。
+        // 没有它，每张图都按原始字节内联，raccoon/qoder 的请求体上限必被超出。
         readImageRequest: imageRequestBridge,
         fetchImpl: observer.fetcher(fetch),
         fetchRemoteModels: async () => product.fallbackModels,
@@ -481,7 +495,7 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
           // 与 `directoryFetch` 同口径：带上响应体里的业务码/原因。
           // ⚠️ HTTP 状态一律按瞬态处理（不标记 probeKind）：429/5xx/限流
           // 甚至 401（凭据临期）都不代表「该版本被拒」——把状态类失败记成
-          // 硬拒绝会让候选阶梯被一次限流永久拉黑（真实缺陷，2026-11-08）。
+          // 硬拒绝会让候选阶梯被一次限流永久记为拒绝（真实缺陷，2026-11-08）。
           let detail = "";
           try {
             detail = await response.text();
@@ -634,7 +648,7 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
        * ⚠️ 三条纪律：① 单飞 —— 探测中再来的 reload 复用同一轮；② 时间闸
        * （默认 24h，`CHANNEL_HUB_VERSION_PROBE_MIN_MS` 可覆盖）—— 先落
        * `catalog-version-probe-at` 再探测，探测挂了也把下一轮推到闸门外，
-       * 避免每次刷新都白打一批请求；③ 全吞异常 —— 探测是锦上添花，绝不能
+       * 避免每次刷新都先发送一批必然失败的请求；③ 捕获全部异常 —— 探测属于附加能力，不能
        * 让「更新模型」失败。
        *
        * 探测用的凭据取**第一个启用账号**（目录请求按账号鉴权，任意账号皆可）；
@@ -673,7 +687,7 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
                 } catch (e) {
                   // ⚠️ 请求级失败（网络/HTTP/形状）一律瞬态：探测每轮并发
                   // 打同一端点，最容易被限流的就是这批请求；把 429/5xx 记成
-                  // 硬拒绝会让候选阶梯被一次限流永久拉黑。真正的硬拒绝只有
+                  // 硬拒绝会让候选阶梯被一次限流永久记为拒绝。真正的硬拒绝只有
                   // `runVersionProbe` 里的「候选缺既有模型」（确定性结果）。
                   return { ok: false, transient: true, reason: redact(e) };
                 }
@@ -732,7 +746,7 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
           ),
         );
         await hydrate();
-        // 目录版本探测（仅启用策略的渠道）：本轮有成功快照才值得探测；
+        // 目录版本探测（仅启用策略的渠道）：本轮有成功快照时才进行探测；
         // 采纳了更高版本就**当场重刷**快照并重建适配器，新模型立刻进菜单，
         // 而不是等下一次手动刷新。
         if (versionState && results.some((s) => !s?.error)) {
@@ -769,18 +783,49 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
           .map((m) => {
             const rate = rateLabel(m);
             /**
+             * 全局输入预算的生效点之一（另一个是 `resolveModel`）。
+             *
+             * 按**该模型自己的输出预留**反算窗口，使「设一个预算」在不同
+             * 模型上的含义一致；上游窗口更小时 `min` 保持原值（不放大）。
+             * 大窗口档同受约束：被压到不大于常规档时，档位后缀自然消失。
+             */
+            const baseWindow = limitedContextWindow(
+              m.contextWindow,
+              m.maxOutputTokens ?? m.maxTokens,
+              contextBudget,
+            );
+            const extendedWindow =
+              m.maxContextWindow === undefined
+                ? undefined
+                : limitedContextWindow(
+                    m.maxContextWindow,
+                    m.maxModeOutputTokens ??
+                      m.maxOutputTokens ??
+                      m.maxTokens,
+                    contextBudget,
+                  );
+            const limited = {
+              ...m,
+              ...(baseWindow === undefined
+                ? {}
+                : { contextWindow: baseWindow }),
+              ...(extendedWindow === undefined
+                ? {}
+                : { maxContextWindow: extendedWindow }),
+            };
+            /**
              * 大窗口档后缀：`1M`。
              *
              * ⚠️ 必须拼进 `name`（模型菜单只渲染 name，见 `traeDisplayName`
              * 的同一条理由）；且**只在真正启用时**拼 —— 未启用却写 1M 会让
              * 用户以为已经在用大窗口。
              */
-            const tier = extendedTierLabel(m, extended);
+            const tier = extendedTierLabel(limited, extended);
             const decorated =
               (rate === undefined ? m.name : m.name + " · " + rate) +
               (tier === undefined ? "" : " · " + tier);
             return {
-              ...m,
+              ...limited,
               inputModalities:
                 m.supportsImage === true || m.supportsImages === true
                   ? ["text", "image"]
@@ -803,18 +848,57 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
             return () => ({ id: "channel-hub/" + id, name });
           if (k === "listModels" || k === "listAllModels") return visible;
           if (k === "resolveModel")
-            return async (_p, m, signal) => ({
-              ...(await adapter.resolveModel(id, m, signal)),
-              provider: "channel-hub/" + id,
-            });
+            return async (_p, m, signal) => {
+              const resolved = await adapter.resolveModel(id, m, signal);
+              /**
+               * 全局输入预算的**权威生效点**：DSH 只认这里返回的
+               * `context.contextWindow`（自动压缩按它算阈值）。
+               *
+               * 用适配器自己的 `defaultMaxTokens` 反算，而不是目录字段 ——
+               * 后者在部分渠道与真实请求预留不一致（如 Trae 大窗口档）。
+               * 预算未设置时 `limitedContextWindow` 原样返回，行为不变。
+               */
+              const window = limitedContextWindow(
+                resolved.context?.contextWindow,
+                resolved.defaultMaxTokens,
+                contextBudget,
+              );
+              return {
+                ...resolved,
+                provider: "channel-hub/" + id,
+                ...(window === undefined
+                  ? {}
+                  : { context: { contextWindow: window } }),
+              };
+            };
           if (k === "prepareCall")
             return async (_p, m, signal) => {
               if (!(await visible()).some((x) => x.id === m))
                 throw Error("模型未在动态目录中启用");
               const prepared = await adapter.prepareCall(id, m, signal);
+              /**
+               * 输入预算的第三个生效点。
+               *
+               * ⚠️ 宿主的 `prepareCall` **不经过** `resolveModel`：它直接取
+               * 适配器 `prepareCall` 返回的 `model`（见 `dsh-llm` 的
+               * `prepareCall` 实现），自动压缩读的才是 `resolveModelInfo`。
+               * 两处都要钳制，否则「压缩按限制值、请求按上游值」，界面与
+               * 实际预算对不上。
+               */
+              const window = limitedContextWindow(
+                prepared.model?.context?.contextWindow,
+                prepared.model?.defaultMaxTokens,
+                contextBudget,
+              );
               return {
                 ...prepared,
-                model: { ...prepared.model, provider: "channel-hub/" + id },
+                model: {
+                  ...prepared.model,
+                  provider: "channel-hub/" + id,
+                  ...(window === undefined
+                    ? {}
+                    : { context: { contextWindow: window } }),
+                },
                 stream: (opts) =>
                   streamWithSelection(
                     opts,
@@ -1089,6 +1173,23 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
     drivers,
     login,
     pending,
+    /**
+     * 全局「单次请求输入预算」。
+     *
+     * `null` = 跟随上游（默认，行为与未实现该功能时一致）。档位是固定集合
+     * （见 `core/context-limit.ts`）：低于最大输出预留的数值会让宿主算不出
+     * 可用输入预算，故不接受任意数字。
+     */
+    contextBudget: {
+      get: () => contextBudget ?? null,
+      set: async (value) => {
+        if (value !== null && !isContextBudgetTier(value))
+          throw Error("不支持的输入预算档位");
+        contextBudget = normalizeContextBudget(value);
+        await store.call("set", "context-budget", contextBudget ?? null);
+        ctx.emit("llm/adapters-updated");
+      },
+    },
     loginsIdle: () => ![...pending.values()].some((p) => p.status === "pending"),
     async waitForLogins() {
       while ([...pending.values()].some((p) => p.status === "pending"))
@@ -1111,6 +1212,17 @@ export async function createDrivers(ctx, { catalog, observer, store }) {
         const driver = drivers.get("trae");
         if (driver?.product) driver.product.maxMode = saved;
       }
+      /**
+       * 全局输入预算。
+       *
+       * ⚠️ 与「大窗口档」同样必须在 `hydrate()` 之前恢复：`visible()` 与
+       * `resolveModel()` 现读该值，晚一步会让首屏先按上游窗口渲染一遍
+       * （用户会看到 1M，随后才跳成限制值）。
+       *
+       * 缺失或非法值一律按「跟随上游」处理：旧版本写坏的键不能让所有模型
+       * 失去窗口。
+       */
+      contextBudget = normalizeContextBudget(await store.call("get", "context-budget"));
     },
     async hydrate() {
       for (const d of drivers.values()) await d.hydrate?.();

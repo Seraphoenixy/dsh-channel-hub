@@ -33,8 +33,8 @@
  * ## 清理失败不能拖垮删号
  *
  * 删号本身是用户明确操作，必须成功返回；单个快照键删除失败只记一条 warn
- * （例如库被另一个连接锁住）。残留的孤儿键最坏结果就是回到这次要修的状态，
- * 不值得让「删号」这个动作失败。
+ * （例如库被另一个连接锁定）。残留的孤儿键最坏结果就是回到这次要修的状态，
+ * 不应让「删号」这个动作失败。
  */
 
 import type { Store } from "../storage/client.ts";
@@ -88,7 +88,7 @@ export async function purgeAccountCredential(
   const service = credentials as Record<string, unknown> | undefined;
   if (service === undefined || service === null) return false;
   // 顺序：`unset` 是宿主当前 API；`delete` / `remove` 只作旧宿主兜底。
-  // `TypeError` 表示「名字看起来在、其实不是这个服务的方法」（命名空间代理
+  // `TypeError` 表示「名字看起来在、实际不是这个服务的方法」（命名空间代理
   // 对未知方法也会返回闭包），此时继续试下一个名字，而不是当成清理失败。
   for (const name of ["unset", "delete", "remove"] as const) {
     const drop = service[name];

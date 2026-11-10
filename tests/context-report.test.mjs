@@ -23,7 +23,7 @@ import {
  * （`dsh-llm` 的 `normalizeModelInfo`；`listModels` 的返回值**不含**该字段）。
  * 缺了它，`dsh-compaction-basic` 会在每一步抛
  * `TargetPressureConfigError: no context capacity for <provider>/<model>` ——
- * 自动压缩完全不工作。故这里逐渠道锁住「resolveModel 必须给出窗口」。
+ * 自动压缩完全不工作。故这里逐渠道锁定「resolveModel 必须给出窗口」。
  */
 
 /* ───────────────────────────── Gemini ───────────────────────────── */
@@ -164,7 +164,7 @@ test("every model the live CodeArts directory can actually expose resolves to a 
 });
 
 test("CodeArts static windows follow each model's published size, not one shared value", async () => {
-  // 逐个值钉死，防止有人「顺手统一成 1M」。这些数字各有来源（见
+  // 逐个值锁定，防止后续被统一成 1M。这些数字各有来源（见
   // `llm-adapter.ts` 的 CONTEXT_WINDOWS 注释），尤其码道自己的 GLM-5.2
   // 是 202752 而非 buddy/qoder 的 1M，口径不同不能混用。
   const expected = {
@@ -322,7 +322,7 @@ test("CodeArts still retries once when upstream reports benefit not found", asyn
 
 test("CodeArts catalog stops calling the retired gateway config endpoint", async () => {
   // 只允许打 builtin 一个端点：gateway/config 已下线（恒 4000 invalid channel），
-  // 每次刷新白打一次必然失败的请求。
+  // 每次刷新先发送一次必然失败的请求。
   const requested = [];
   const models = await fetchCodeArtsRemoteModels(
     { access_key_id: "synthetic-ak", secret_access_key: "synthetic-sk", security_token: "synthetic-st" },
@@ -347,7 +347,7 @@ test("CodeArts catalog stops calling the retired gateway config endpoint", async
 
 test("CodeArts ignores a stale on-disk benefit cache written before the shutdown", () => {
   // 用户机器上可能残留 codearts_benefit_models.json（通道关闭前写入的历史模型）。
-  // 判定刻意不再读它：否则一份死数据会长期决定是否发 maas_type。
+  // 判定刻意不再读它：否则一份已失效的旧数据会长期决定是否发 maas_type。
   const dir = mkdtempSync(join(tmpdir(), "chub-benefit-"));
   try {
     writeFileSync(

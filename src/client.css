@@ -118,9 +118,26 @@
 .chub-pill.err{color:var(--chub-err);border-color:color-mix(in srgb,var(--chub-err) 30%,transparent);background:color-mix(in srgb,var(--chub-err) 8%,transparent)}
 .chub-pill.err .chub-dot{background:var(--chub-err)}
 /**
+ * 全局「输入预算」的分段控件。
+ *
+ * 与工具条按钮同一套视觉语言（小号按钮、同一描边与圆角），不使用原生
+ * `select`：原生下拉的系统外观与面板其余控件不一致。
+ */
+.chub-budget{display:inline-flex;align-items:center;gap:2px;padding:2px;border:1px solid var(--chub-line-soft);border-radius:9px;background:color-mix(in srgb,var(--chub-layer-2) 72%,transparent)}
+.chub-budgetlabel{font-size:11.5px;line-height:1.5;color:var(--chub-text-3);padding:0 7px 0 5px;white-space:nowrap}
+.chub-budgetopt{
+  border:0;border-radius:7px;background:transparent;color:var(--chub-text-2);
+  font:inherit;font-size:12.5px;font-weight:560;line-height:1.5;
+  padding:3px 9px;cursor:pointer;white-space:nowrap;
+  transition:background .16s ease,color .16s ease;
+}
+.chub-budgetopt:hover:not(:disabled){background:color-mix(in srgb,var(--chub-layer-3) 82%,transparent);color:var(--chub-text)}
+.chub-budgetopt[aria-pressed=true]{background:color-mix(in srgb,var(--chub-accent) 16%,var(--chub-layer-1));color:var(--chub-accent)}
+.chub-budgetopt:disabled{opacity:.42;cursor:not-allowed}
+/**
  * 四个小指标压成一条窄带。
  *
- * ⚠️ auto-fit 而不是固定 4 列：窄窗口下自动折行，不会把数字挤成两行。
+ * ⚠️ auto-fit 而不是固定 4 列：窄窗口下自动折行，不会把数字分成两行。
  * 数值用 tabular-nums 保证抖动时宽度稳定。
  */
 .chub-ministats{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px;position:relative;z-index:1}
@@ -223,7 +240,7 @@
  *
  * ⚠️ `align-items:stretch`（原来是 `start`）是有意的：卡片高度由**账号数**
  * 决定，而网格按行对齐，`start` 会让「1 个账号的卡」旁边那张「2 个账号的卡」
- * 下面留出一整块死白（1440px 实测 634px，其中 502px 仅来自双账号卡与单账号
+ * 下面留出一整块空白（1440px 实测 634px，其中 502px 仅来自双账号卡与单账号
  * 卡同排）。改成 stretch 后行内卡片等高，残差交给卡内的可伸缩子项吸收。
  */
 .chub-channels{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px;align-items:stretch}
@@ -234,7 +251,7 @@
   flex-direction:column;
   gap:10px;
   min-width:0;
-  /* 配合网格的 stretch：卡片吃满行高，内部才有可分配的剩余空间。 */
+  /* 配合网格的 stretch：卡片占满行高，内部才有可分配的剩余空间。 */
   height:100%;
   padding:15px 16px 13px;
   overflow:hidden;
@@ -277,7 +294,7 @@
  * 卡片头：左端是标题，右端是「操作按钮 + 状态徽标」这一个整体。
  *
  * `.chub-chanheadend` 整体参与换行（而不是让按钮与徽标各自换行）：窄卡片里
- * 若只有徽标被挤到第二行，按钮就与它脱开了 —— 而这次的诉求正是「按钮紧挨
+ * 若只有徽标换到第二行，按钮就与它脱开了 —— 而这次的诉求正是「按钮紧挨
  * 状态左侧」。Loomy 有两枚登录按钮，380px 卡宽下必然走到换行分支。
  */
 .chub-chanhead{display:flex;align-items:center;gap:6px 9px;flex-wrap:wrap;min-width:0}
@@ -313,7 +330,7 @@
  *
  * ⚠️ `flex-wrap:nowrap` 是长昵称那个缺陷的核心修复：这些读数项都是短小的
  * 固定文字（`账号 1/1`、`模型 2`、`目录 · 20 分钟前`），整行本来就该是一行。
- * 允许换行的后果是「`select` 长一点，整组读数就被挤到下一行」——用户报的
+ * 允许换行的后果是「`select` 长度增加后，整组读数被推到下一行」——用户报的
  * 「挤压其它文字」就是它。让步由 `.chub-account-choice` 单向承担。
  * 窄卡片（<420px）下的兜底见 `@container chan`。
  */
@@ -335,7 +352,7 @@
 /**
  * 卡片头里的操作组：紧挨在状态徽标**左侧**。
  *
- * `flex:none`（不可压缩）是关键：允许收缩会让窄卡片里的按钮挤成一列、
+ * `flex:none`（不可压缩）是关键：允许收缩会让窄卡片里的按钮收窄成一列、
  * 文字被压出按钮框。让标题块（`.chub-chanid`，`min-width:0` + 省略号）
  * 去承担压缩，按钮永远保持完整可点。
  */
@@ -498,7 +515,7 @@
  * 看板里这两张汇总表不必拉满整行。
  *
  * ⚠️ 改成上下堆叠后出现的新问题（2560px 实测）：表格继承 width:100%，
- * 7 列被摊到 2500px 宽，列间留出大片空白，数字与表头离得很远反而难读。
+ * 7 列扩展到 2500px 宽，列间留出大片空白，数字与表头离得很远反而难读。
  * 给一个**上限**让它们停在便于扫读的宽度；窗口窄于该值时仍自适应收缩。
  * 只作用于 .chub-stack 内的表，运行日志那种真正需要宽度的表不受影响。
  */
@@ -553,7 +570,7 @@
  * ⚠️ **不能写成 td:last-child**（真实缺陷，2026-10-21 用户报障「运行日志
  * 最后一列内容会不是垂直居中」）：旧「详情」列正好是最后一列，于是这条规则
  * 用位置选中了它。详情列移除后最后一列变成「缓存命中率」，vertical-align:top
- * 就把它顶到行首，与同排其它居中的单元格错位。
+ * 就把它移到行首，与同排其它居中的单元格错位。
  * 故改为按**内容**选中：只有真的带 details 的格子才顶部对齐。
  */
 .chub-scroll td:has(details){vertical-align:top}
@@ -593,7 +610,7 @@
  * 运行日志：表格**自己纵向滚动**，横向滚动条因此固定在它的底边常驻可见。
  *
  * ⚠️ 真实诉求（2026-10-21，用户带侧栏、窗口更窄）：日志表在窄窗口下确实
- * 需要横向滚动，但滚动条画在**表格容器的底边**——若整个日志区跟着页面一起
+ * 需要横向滚动，但滚动条画在**表格容器的底边**——若整个日志区随页面一起
  * 滚，用户必须先滚到表格最末一行才看得见它，想左右拖还得来回滚。
  *
  * 做法：把这一页的内容区变成"填满剩余高度"的列，日志面板 flex:1 占据
@@ -640,21 +657,21 @@
  *
  * ⚠️ 这是从设置页迁到整窗面板时暴露的真实问题：旧断点按**视口宽度**判分栏，
  * 而设置页里视口可能有 1400px、实际内容区只有约 564px —— 那条查询永远不命中，
- * 双栏和 3 列 KPI 就在 564px 里硬挤。容器查询让「宽了就分栏、窄了就单列」
- * 跟着**真实可用宽度**走，两个入口（整窗 / 设置）自动各得其所，不需要两套规则。
+ * 双栏和 3 列 KPI 只能在 564px 内排布。容器查询让「宽了就分栏、窄了就单列」
+ * 按**真实可用宽度**切换，两个入口（整窗 / 设置）各自得到合适布局，不需要两套规则。
  */
 /**
  * 「使用账号」下拉框。
  *
  * 用户 2026-10-29 报障：「下拉框文字过长会超出挤压其它文字」。实测形态
  * （华为码道，昵称 `codearts-d6a47740-cb1d-4ac1-80d4-34f8e0efe974`，45 字符）：
- * 统计行**被迫换行**，「账号 1/1」「模型 N」「目录」被顶到下一行，卡片比同排
- * 高出一大截；同时原生 `<select>` 的默认 `text-overflow` 是 `clip`，长昵称
- * 在字形中间被硬切（末字符只剩半个字形）。
+ * 统计行**被迫换行**，「账号 1/1」「模型 N」「目录」被推到下一行，卡片比同排
+ * 明显更高；同时原生 `<select>` 的默认 `text-overflow` 是 `clip`，长昵称
+ * 在字形中间被直接截断（末字符只剩半个字形）。
  *
  * 三条规则缺一不可：
  *
- * 1. **整行不换行**（`.chub-chanmeta{flex-wrap:nowrap}`）—— 换行是「挤压」
+ * 1. **整行不换行**（`.chub-chanmeta{flex-wrap:nowrap}`）—— 换行是压缩
  *    的实际机制：不是文字被压扁，而是整组读数被推走。
  * 2. **只有下拉框让步**（`flex:0 1 auto` + `min-width`）—— 读数项 `flex:none`
  *    是不可协商的，否则它们会被压缩/折叠到看不清。
@@ -665,7 +682,7 @@
  *
  * ⚠️ 原先这里还有一条 `flex-wrap:wrap` + 一行「固定使用，不自动换号」的提示
  * 文字。那行提示是**放不下**的主体：带它时一行需要 658px，而卡片内容宽最宽
- * 也只有 442px（2400px 视口实测），于是它把整组读数顶到下一行。已从标记里
+ * 也只有 442px（2400px 视口实测），于是它把整组读数推到下一行。已从标记里
  * 移除，其含义并入下拉框的 `title`（见 client.ts 的 `selectedOptionTitle`）。
  */
 .chub-account-choice{display:flex;align-items:center;gap:7px;min-width:0;max-width:100%;flex-wrap:nowrap;flex:0 1 auto}
@@ -699,8 +716,8 @@
   /**
    * ⚠️ 单列时**必须**收回跨列。
    *
-   * `grid-column:span 2` 在只有 1 列的网格里会凭空造出**隐式第二列**，于是
-   * 卡片只占半宽、右边留一条与卡片等高的白 —— 比原来的洞更糟。实测 780px
+   * `grid-column:span 2` 在只有 1 列的网格里会生成**隐式第二列**，于是
+   * 卡片只占半宽、右边留下一条与卡片等高的空白，比原来出现空洞的情况更糟。实测 780px
    * 会稳定复现。这条规则不能省。
    */
   .chub-channel[data-multi]{grid-column:auto}

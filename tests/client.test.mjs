@@ -27,7 +27,7 @@ const decoded = source
  * 样式源文件。
  *
  * ⚠️ CSS 自 2026-10-21 起从 `client.ts` 的模板字面量移到 `src/client.css`
- * （模板里任何反引号都会截断字符串，连续踩坑 6 次）。**布局形状断言读这里**：
+ * （模板里任何反引号都会截断字符串，2026-10-21 因此连续修改 6 次）。**布局形状断言读这里**：
  * 它是样式的唯一来源，且保留真实换行 —— 构建产物里的 CSS 是一整条带 `\n`
  * 转义的字符串，正则跨行匹配会失效。另有一条测试单独确认它被内联进产物。
  */
@@ -181,7 +181,7 @@ test("channel cards are packed so multi-account cards never strand a row", () =>
   // 2 列下跨列卡放不进行尾那一格，被顶到第 2 行，第 1 行右边空了一大块（1-2-1）。
   //
   // 修法不是 `dense`（它会让视觉顺序偏离 DOM 顺序），而是渲染前按**实际列数**
-  // 把卡片装成满行。`packChannels` 在列数 > 1 时把跨列卡提前，并让 3 列布局
+  // 把卡片排成满行。`packChannels` 在列数 > 1 时把跨列卡提前，并让 3 列布局
   // 里它后面跟一张单列卡补齐。
   const channels = [
     channel("a-single", 1),
@@ -199,7 +199,7 @@ test("channel cards are packed so multi-account cards never strand a row", () =>
 });
 
 test("packChannels fills rows around spanning cards", () => {
-  // ⚠️ 测的是**构建产物里的真实实现**，不是复刻逻辑：从 dist/client.js 里抠出
+  // ⚠️ 测的是**构建产物里的真实实现**，不是复刻逻辑：从 dist/client.js 中取出
   // `packChannels` 的函数体求值。复刻一份逻辑会在改动时悄悄漂移 —— 测试仍然
   // 绿，行为却已经变了（这类「影子实现」比没有测试更危险）。
   const start = source.indexOf("function packChannels");
@@ -217,7 +217,7 @@ test("packChannels fills rows around spanning cards", () => {
   ];
   const ids = (result) => JSON.stringify(result.map((c) => c.id));
   // 用 JSON 比较而不是 deepEqual：`pack` 在另一个 vm 上下文里执行，返回的数组
-  // 原型与当前 realm 不同，deepStrictEqual 会因此失败（值其实一样）。
+  // 原型与当前 realm 不同，deepStrictEqual 会因此失败（值本身相同）。
   const expect = (value) => JSON.stringify(value);
 
   // 2 列：跨列卡占满整行（perWide = 0），剩余单列卡按原顺序排在后面。
@@ -667,7 +667,7 @@ test("multi-account channel cards span two columns and lay their accounts side b
   // 用户 2026-10-22：「有的有两个账号、有的单账号留下很多空隙」。
   //
   // 根因不是间距：账号块是纵向列表，多一个账号就多一整块（约 200px），而网格
-  // 按行对齐 —— 1440px 实测同排单账号卡下方共 634px 死白，其中 502px 仅来自
+  // 按行对齐 —— 1440px 实测同排单账号卡下方共 634px 空白，其中 502px 仅来自
   // 「双账号卡与单账号卡同排」。做法是让多账号卡跨两列、账号在卡内并排，
   // 高度差被宽度吸收（见 docs/LAYOUT.md）。
   assert.ok(
@@ -722,7 +722,7 @@ test("the refresh-all action reports its result and survives the reload", () => 
     decoded.includes("skipped"),
     "the host reports channels without accounts as skipped; the UI must read it",
   );
-  // 文案分档：失败要点名、跳过要计数。
+  // 文案分档：失败项要逐条列出、跳过要计数。
   assert.match(decoded, /失败 /, "failures must be named in the result line");
   assert.match(
     decoded,
@@ -870,10 +870,10 @@ test("an unknown cache reading carries the upstream's reason in the log table", 
 
 test("the stylesheet lives in its own file and is inlined as a string", () => {
   // 结构性修复（2026-10-21）：样式曾是 `client.ts` 里 570 行的模板字面量，
-  // 任何出现在 CSS 注释里的反引号都会提前终止字符串 —— 连续踩坑 6 次，
-  // 表现是一堆莫名其妙的语法错误。移到 `.css` 后反引号只是普通字符。
+  // 任何出现在 CSS 注释里的反引号都会提前终止字符串 —— 2026-10-21 因此连续修改 6 次，
+  // 表现为难以定位的语法错误。移到 `.css` 后反引号只是普通字符。
   //
-  // 这条测试同时锁住三件事，缺一条迁移就会静默失效：
+  // 这条测试同时锁定三件事，缺一条迁移就会静默失效：
   // 1. 源码里不再有 CSS 模板字面量；
   // 2. 构建产物里**确实**内联了样式（否则页面变无样式）；
   // 3. 没有被抽成独立的 `.css` 资源（esbuild 默认行为，默认导出为空对象）。
@@ -900,7 +900,7 @@ test("the stylesheet lives in its own file and is inlined as a string", () => {
 
 /**
  * 从构建产物里取出 `stackHeights`（它在组件工厂内部，无法直接 import）。
- * 用括号计数定位函数体，避免正则被嵌套块骗到。
+ * 用括号计数定位函数体，避免正则被嵌套块误判。
  */
 function extractStackHeights() {
   const start = source.indexOf("function stackHeights");
@@ -1054,7 +1054,7 @@ test("a long account nickname is ellipsized instead of squeezing the stats row",
   //
   // 1440px 实测的故障形态：统计行**被迫换行**，「账号 1/1」「模型 7」「目录」
   // 被顶到下一行，卡片比同排高出一大截；同时原生 select 的默认
-  // `text-overflow:clip` 把文字在字形中间硬切（末字符只剩半个）。
+  // `text-overflow:clip` 把文字在字形中间直接截断（末字符只剩半个）。
   //
   // 根因不是「下拉框太宽」，而是统计行允许换行 + 旁边还有一行 120px 的
   // 「固定使用，不自动换号」。带那行提示时整行需要 658px，而卡片内容宽最宽

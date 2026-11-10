@@ -119,10 +119,10 @@ test("单个键删除失败只记 warn，其余照删且不拖垮删号", async 
 /**
  * 凭据注销（`purgeAccountCredential`）。
  *
- * 这一组钉死的是宿主 API 的**真实方法面**：`ctx.credentials` 只有
+ * 这一组锁定的是宿主 API 的**真实方法面**：`ctx.credentials` 只有
  * `resolve` / `describe` / `set` / `unset`。旧实现写 `credentials.delete?.()`，
  * 在真实宿主上抛 `TypeError`，又因为调用点在 `removeAccount()` 之后，
- * 表现为「弹报错但账号确实被删掉了」，并顺手跳过了快照与凭据清理。
+ * 表现为「请求报错但账号确实已删除」，并同时跳过了快照与凭据清理。
  */
 test("按宿主真实 API 用 unset 注销凭据", async () => {
   const refs: string[] = [];

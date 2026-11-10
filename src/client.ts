@@ -1,5 +1,5 @@
 import { rateLabel, promotionNote, promotionWindow } from "./core/rate.ts";
-import { extendedTierBadge } from "./core/context.ts";
+import { extendedTierBadge, tokenText } from "./core/context.ts";
 import css from "./client.css";
 
 declare const window: Window & { __ModuleLoader__: any };
@@ -96,7 +96,7 @@ window.__ModuleLoader__.load({
      * 「使用账号」下拉框的悬停全文。
      *
      * 下拉框用 `text-overflow:ellipsis` 收窄长昵称（原生 select 默认是在字形
-     * 中间硬切），全文只能靠悬停补回。文案与 `<option>` 的生成方式保持一致：
+     * 中间被直接截断），全文只能靠悬停补回。文案与 `<option>` 的生成方式保持一致：
      * 昵称 + 重名时的 id 尾号 + 停用标记 —— 两处拼接若各写一遍，悬停看到的
      * 名字会和下拉项对不上。
      */
@@ -136,12 +136,12 @@ window.__ModuleLoader__.load({
       return { text: date(n), tone: "" };
     };
     /**
-     * 把渠道卡按**列数装成满行**，只决定渲染顺序，不动数据。
+     * 把渠道卡按**列数排成满行**，只决定渲染顺序，不动数据。
      *
      * 为什么需要它：2 个以上账号的卡要跨两列（`.chub-channel[data-multi]`），而
-     * CSS 网格**不会把跨列卡塞进行尾剩下的那一格** —— 它只能整体换到下一行。
-     * 于是只要「单列卡 + 跨列卡」凑不满一行，就会出现一整格空白。用户截图里的
-     * `1-2-1` 正是这个：第 1 行 1 张单列卡，第 2 张是跨列卡放不下，被顶到第 2 行，
+     * CSS 网格**不会把跨列卡放入行尾剩余的那一格** —— 它只能整体换到下一行。
+     * 于是只要「单列卡 + 跨列卡」不足一行，就会出现一整格空白。用户截图里的
+     * `1-2-1` 正是这个：第 1 行 1 张单列卡，第 2 张是跨列卡放不下，换到第 2 行，
      * 第 1 行右侧空了一大块。
      *
      * 做法：跨列卡后面**紧跟**足够数量的单列卡把这一行填满。
@@ -184,6 +184,13 @@ window.__ModuleLoader__.load({
       const [logs, setLogs] = useState({ items: [], total: 0 } as any);
       const [error, setError] = useState("");
       const [health, setHealth] = useState(null as any);
+      /**
+       * 全局设置（目前只有「输入预算」）。
+       *
+       * `null` 与 `contextBudget: null` 都表示跟随上游：前者是尚未读到，
+       * 后者是用户明确选择的档位。
+       */
+      const [settings, setSettings] = useState(null as any);
       const [filter, setFilter] = useState({
         range: "today",
         provider: "",
@@ -215,7 +222,7 @@ window.__ModuleLoader__.load({
       /**
        * 渠道网格当前排了几列（`1` 表示单列）。
        *
-       * 用途只有一个：把卡片**按实际列数装成满行**（见 `packChannels`）。列数
+       * 用途只有一个：把卡片**按实际列数排成满行**（见 `packChannels`）。列数
        * 由容器宽度决定，所以不能用视口宽度猜；这里直接量
        * `grid-template-columns` 解析出轨道数。
        */
@@ -296,17 +303,19 @@ window.__ModuleLoader__.load({
       const load = async () => {
         const current = ++sequence.current;
         try {
-          const [c, s, l, health] = await Promise.all([
+          const [c, s, l, health, prefs] = await Promise.all([
             rpc("channels.list"),
             rpc("usage.summary", query()),
             rpc("requests.list", query()),
             rpc("health"),
+            rpc("settings.get"),
           ]);
           if (current !== sequence.current) return true;
           setChannels(c);
           setStats(s);
           setLogs(l);
           setHealth(health);
+          setSettings(prefs);
           setError("");
           /**
            * ⚠️ `notice` 不在这里清：它由 `refreshAllModels` 在 `load()` **之后**
@@ -382,7 +391,7 @@ window.__ModuleLoader__.load({
        * ⚠️ **必须给出可读的结果反馈**（2026-10-29 修）。旧实现只在有
        * `failures` 时才写 `error`，全成功时界面**什么也不显示** —— 用户点完
        * 按钮看不出发生没发生，于是报「按钮不能用」。现在统一写一条结果行：
-       * 成功几个、跳过几个（该渠道没有账号）、失败几个（点名原因）。
+       * 成功几个、跳过几个（该渠道没有账号）、失败几个（逐条列出原因）。
        *
        * ⚠️ 不用 `busy`：那一位由 `action` 在每次调用前后翻转，按钮会闪回可点。
        * 这里自己维护 `refreshing`，并把按钮文案切成「更新中…」。
@@ -715,13 +724,13 @@ window.__ModuleLoader__.load({
        *
        * ⚠️ 只在**上游明确说**本次请求没挂缓存池（`Attempt.cachePool === null`）时
        * 给出。Trae 自 2026-10-27 起恒报 0、且 `metadata` 里明说没分配池，只留一个
-       * 「—」会让下一个人把「上游没给」重新排查成「插件丢字段」—— 这正是本次
+       * 「—」会让后续排查把「上游未上报」判为「插件丢失字段」—— 这正是本次
        * 报障（`docs/ACCEPTANCE.md` 2026-11-02）花掉的成本。
        */
       const cacheUnknownNote = (attempt: any) =>
         attempt?.cachePool === null
           ? "上游未分配缓存池：Trae 自 2026-10-27 起不再上报缓存读/写（token_usage 恒为 0）。" +
-            "账单侧复测显示缓存折扣仍在生效（同一前缀第二次便宜约 3 倍），故这里按「未知」显示，而不是记成 0%。"
+            "账单侧复测显示缓存折扣仍在生效（同一前缀第二次计费约为首次的 1/3），故这里按「未知」显示，而不是记成 0%。"
           : undefined;
       /** 把原因挂到格子上的 `title`（没有原因就原样返回内容）。 */
       const withNote = (content: any, note: string | undefined) =>
@@ -1095,9 +1104,9 @@ window.__ModuleLoader__.load({
        * 渠道卡的**渲染顺序**：由 `packChannels` 按实际列数装箱决定。
        *
        * ⚠️ 这是布局的一部分，不是化妆：2 个以上账号的卡跨两列，而 CSS 网格
-       * **不会把它塞进行尾剩下的那一格**，只能整体换行 —— 于是「单列卡 + 跨列卡」
-       * 凑不满一行时，前一行右侧就空一整格（用户截图里的 `1-2-1`：华为码道
-       * 独占第 1 行，跨列的 CodeBuddy 被顶到第 2 行）。
+       * **不会把它放入行尾剩余的那一格**，只能整体换行 —— 于是「单列卡 + 跨列卡」
+       * 不足一行时，前一行右侧就空一整格（用户截图里的 `1-2-1`：华为码道
+       * 独占第 1 行，跨列的 CodeBuddy 换到第 2 行）。
        *
        * ⚠️ 必须**真的重排 DOM 顺序**，不能用 CSS `order` 或
        * `grid-auto-flow:dense`：那两者让视觉顺序偏离 DOM 顺序，Tab 焦点、
@@ -1469,6 +1478,55 @@ window.__ModuleLoader__.load({
                   "div",
                   { className: "chub-sectools" },
                   /**
+                   * 全局「输入预算」：与工具条按钮同一套视觉语言（小号按钮
+                   * 组成的分段控件），不引入原生下拉框。
+                   *
+                   * 只有一个值（没有渠道级/模型级开关）：DSH 的上下文容量
+                   * 只来自适配器上报的窗口，限制只能在解析模型时按各模型
+                   * 声明的输出预留反算，界面因此不必按渠道展开。
+                   */
+                  h(
+                    "div",
+                    {
+                      className: "chub-budget",
+                      role: "group",
+                      "aria-label": "输入预算",
+                    },
+                    h("span", { className: "chub-budgetlabel" }, "输入预算"),
+                    ...[
+                      [null, "跟随上游"],
+                      ...(settings?.contextBudgetTiers ?? []).map(
+                        (tier: number) => [
+                          tier,
+                          tokenText(tier) ?? String(tier),
+                        ],
+                      ),
+                    ].map(([value, label]: any) =>
+                      h(
+                        "button",
+                        {
+                          key: String(value ?? "auto"),
+                          type: "button",
+                          className: "chub-budgetopt",
+                          "aria-pressed":
+                            (settings?.contextBudget ?? null) === value,
+                          disabled: busy,
+                          title:
+                            value === null
+                              ? "不限制：按上游窗口下发的容量"
+                              : "单次请求最多 " +
+                                label +
+                                " 输入；窗口按各模型声明的输出预留反算",
+                          onClick: () =>
+                            action("channels.setContextBudget", {
+                              budget: value,
+                            }),
+                        },
+                        label,
+                      ),
+                    ),
+                  ),
+                  /**
                    * 渠道级「更新模型」已上移到这里并**改为更新全部渠道**：
                    * 目录属于渠道而不是某一张卡，逐卡点一次等于重复劳动。
                    *
@@ -1584,7 +1642,7 @@ window.__ModuleLoader__.load({
                        *
                        * 账号块是纵向列表，多一个账号就多一整块，于是「双账号
                        * 卡」比「单账号卡」高约 200px；网格按行对齐，同排的
-                       * 单账号卡下面就是一块死白（1440px 实测 634px）。跨列后
+                       * 单账号卡下面就是一块空白（1440px 实测 634px）。跨列后
                        * 账号在卡内并排，高度差被宽度吸收。
                        *
                        * ⚠️ 用显式属性而不是让 CSS 写 `:has(.chub-acct +
@@ -1617,7 +1675,7 @@ window.__ModuleLoader__.load({
                        *
                        * 用户 2026-10-29：「添加账号」放在「运行中 / 未接入」的
                        * **左侧**。两枚元素必须同组，否则窄卡片里会出现「按钮留在
-                       * 第一行、徽标被挤到第二行」—— 视觉上它俩就不挨着了，而
+                       * 第一行、徽标换到第二行」—— 视觉上它俩就不挨着了，而
                        * 「动作紧挨结论」正是这次要的效果。
                        *
                        * 顺序是 DOM 顺序（标题 → 操作 → 状态），不用 `order`
@@ -1694,7 +1752,7 @@ window.__ModuleLoader__.load({
                             /**
                              * `title` 放**选中项全文**：下拉框用 `text-overflow:
                              * ellipsis` 把长昵称收成 `…`（否则原生 select 会在
-                             * 字形中间硬切，见 client.css 的说明），全文因此只能
+                             * 字形中间被直接截断，见 client.css 的说明），全文因此只能
                              * 靠悬停补回。未选中（自动选择）时不加，避免出现一个
                              * 与界面文字重复的空悬停。
                              */
@@ -1734,8 +1792,8 @@ window.__ModuleLoader__.load({
                          * 这句话在卡片网格里**永远放不下**：华为码道这种 45 字符
                          * 昵称的卡片，连同提示语一行需要 658px，而卡片内容宽最宽
                          * 也只有 442px（2400px 视口）。放不下的结果不是它自己被
-                         * 截断，而是把「账号 N/M」「模型 N」「目录」整组顶到下一行，
-                         * 卡片比同排高出一大截 —— 用户报的「下拉框文字挤压其它
+                         * 截断，而是把「账号 N/M」「模型 N」「目录」整组推到下一行，
+                         * 卡片明显高于同排 —— 用户报的「下拉框文字挤压其它
                          * 文字」正是这个。
                          *
                          * 信息也没有丢：下拉框显示着一个具体账号（而不是「自动
@@ -2131,7 +2189,7 @@ window.__ModuleLoader__.load({
                                         className: "chub-inline muted",
                                         style: { padding: "6px 2px 0" },
                                       },
-                                      "目录为空。点击上方“更新模型”重试，远端确认的条目会自动出现。",
+                                      "目录为空。点击上方“更新模型”重新拉取，远端确认的条目会进入目录。",
                                     )
                                   : h(
                                       "div",
@@ -2209,6 +2267,28 @@ window.__ModuleLoader__.load({
                                         m.id,
                                         rate ? "计费系数 " + rate : "",
                                         tier ? tier.title : "",
+                                        /**
+                                         * 全局输入预算的展示：只在**确实被收紧**
+                                         * 时出现（`displayLimitedModel` 只在
+                                         * 钳制后与上游不同时写这两个字段），
+                                         * 未设置或未收紧的模型不多一行。
+                                         */
+                                        m.upstreamContextWindow !== undefined
+                                          ? "输入预算 " +
+                                            (tokenText(
+                                              settings?.contextBudget,
+                                            ) ?? "未设置") +
+                                            "（上游 " +
+                                            tokenText(m.upstreamContextWindow) +
+                                            "）"
+                                          : "",
+                                        m.upstreamContextWindow !== undefined &&
+                                        m.estimatedCompactionTokens !== undefined
+                                          ? "压缩点 ≈ " +
+                                            tokenText(
+                                              m.estimatedCompactionTokens,
+                                            )
+                                          : "",
                                         note
                                           ? "活动 " +
                                             note +
@@ -2450,7 +2530,7 @@ window.__ModuleLoader__.load({
                                *
                                * ⚠️ 当天没有分渠道数据时（`dailyByProvider`
                                * 缺失或全为 0），退回画一根整柱 —— 宁可少一层
-                               * 分解，也不要让已有数据凭空消失。
+                               * 分解，也不要让已有数据无依据地消失。
                                */
                               if (segments.length === 0) {
                                 const height =

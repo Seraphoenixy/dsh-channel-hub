@@ -23,7 +23,7 @@ const frame = (usage, metadata) => ({ usage, metadata });
  * ⚠️ 它们**必须**被忽略而不是被当成错误或用量：`request_wait_in_queue` 带
  * `message` 但没有 `code`，`extra_info` 带 `content` / `input_token`（那个数是
  * `content` 的 token 数，不是 prompt 的未命中量）。观察者的错误判据要求
- * `code` 存在，用量判据要求 `usage` 形状 —— 这条测试把两个前提都钉住，
+ * `code` 存在，用量判据要求 `usage` 形状 —— 这条测试把两个前提都锁定，
  * 否则上游给诊断帧加个 `code` 就会把整条请求误记成失败。
  */
 const DIAGNOSTIC_FRAMES =
@@ -42,7 +42,7 @@ const DIAGNOSTIC_FRAMES =
  * 用真实适配器 + 观察者 + 账本跑一次（或多次）合成上游请求。
  *
  * 每个元素各算一次请求；`eventOrder` 可把 `metadata` 放到 `token_usage` 之后，
- * 用来锁住「诊断帧来晚了就按未知处理」的保守语义。
+ * 用来锁定「诊断帧来晚了就按未知处理」的保守语义。
  */
 async function record(rawUsage, options = {}) {
   const frames = (Array.isArray(rawUsage) ? rawUsage : [rawUsage]).map((f) =>
@@ -142,7 +142,7 @@ test("Trae's post-2026-10-27 zeroed counters with no cache pool are unknown, not
   const zeroedPoolNull = await record(frame(zeroed(), null));
   assert.equal(zeroedPoolNull.usage.cacheReadTokens, undefined);
   assert.equal(zeroedPoolNull.usage.cacheWriteTokens, undefined);
-  // 输入仍是全量 prompt：总 token 不能被「少算命中」弄小（否则自动压缩永不触发）。
+  // 输入仍是全量 prompt：总 token 不能因「少算命中」而变小（否则自动压缩永不触发）。
   assert.equal(zeroedPoolNull.usage.inputTokens, 18955);
   assert.equal(zeroedPoolNull.usage.totalTokens, 19034);
   assert.equal(zeroedPoolNull.attempt.usage.cacheRead, undefined);

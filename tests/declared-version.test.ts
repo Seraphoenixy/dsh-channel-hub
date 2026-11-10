@@ -87,7 +87,7 @@ test("candidates that lose existing models are hard-rejected, not adopted", asyn
 test("request-level failures (4xx/5xx/network) are transient and never remembered", async () => {
   // 真实缺陷修正（2026-11-08）：探测每轮并发打同一端点，最容易被限流的
   // 恰是这批请求；把 429/403 等状态类失败记成硬拒绝会让候选阶梯被一次
-  // 限流永久拉黑。请求级失败一律瞬态，硬拒绝只留给「候选缺既有模型」
+  // 限流永久记为拒绝。请求级失败一律瞬态，硬拒绝只留给「候选缺既有模型」
   // 这种确定性结果（见上一条用例）。
   const outcome = await runVersionProbe({
     state: state(),

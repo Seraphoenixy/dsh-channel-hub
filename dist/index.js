@@ -1346,12 +1346,12 @@ var Observer = class {
           }
         };
         const finish = async (outcome, error) => {
-          if (a.outcome !== "failed" || outcome !== "success")
-            a.outcome = outcome;
+          if (a.outcome === "running") a.outcome = outcome;
           a.ended = Date.now();
           if (error) a.error = redact(error);
           await this.write("attempt", a);
         };
+        let cancelled = false;
         const body = new ReadableStream({
           pull: async (controller) => {
             try {
@@ -1359,17 +1359,22 @@ var Observer = class {
               if (next.done) {
                 scan();
                 await finish("success");
-                controller.close();
+                if (!cancelled) controller.close();
               } else {
                 scan(next.value);
                 controller.enqueue(next.value);
               }
             } catch (e) {
+              if (cancelled || a.outcome !== "running") return;
               await finish(init?.signal?.aborted ? "cancelled" : "failed", e);
-              controller.error(e);
+              try {
+                controller.error(e);
+              } catch {
+              }
             }
           },
           cancel: async (reason) => {
+            cancelled = true;
             const aborted = init?.signal?.aborted === true || this.context.getStore()?.abortSource !== void 0;
             if (a.outcome === "running")
               await finish(
@@ -2217,6 +2222,70 @@ var MigrationService = class {
   }
 };
 
+// src/core/context-limit.ts
+var CONTEXT_BUDGET_HEADROOM = 65536;
+var CONTEXT_BUDGET_RATIO = 0.8;
+var CONTEXT_BUDGET_TIERS = [
+  524288,
+  786432,
+  1048576
+];
+function positive2(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : void 0;
+}
+function isContextBudgetTier(value) {
+  return typeof value === "number" && CONTEXT_BUDGET_TIERS.includes(value);
+}
+function normalizeContextBudget(value) {
+  return isContextBudgetTier(value) ? value : void 0;
+}
+function limitedContextWindow(upstream, reserved, budget) {
+  const window = positive2(upstream);
+  if (budget === void 0 || !isContextBudgetTier(budget)) return window;
+  if (window === void 0) return void 0;
+  const output = Math.max(0, positive2(reserved) ?? 0);
+  return Math.min(window, budget + output + CONTEXT_BUDGET_HEADROOM);
+}
+function estimatedCompactionTokens(window, reserved) {
+  const total = positive2(window);
+  if (total === void 0) return void 0;
+  const output = Math.max(0, positive2(reserved) ?? 0);
+  const messageBudget = total - output;
+  if (messageBudget <= 0) return void 0;
+  const pressureBudget = messageBudget - CONTEXT_BUDGET_HEADROOM;
+  if (pressureBudget <= 0) return void 0;
+  return Math.floor(Math.min(total * CONTEXT_BUDGET_RATIO, pressureBudget));
+}
+function catalogReservedTokens(model, extended = false) {
+  const base = positive2(model?.maxOutputTokens) ?? positive2(model?.maxTokens) ?? 0;
+  if (!extended) return base;
+  return positive2(model?.maxModeOutputTokens) ?? base;
+}
+function displayLimitedModel(model, budget) {
+  const next = { ...model };
+  const base = positive2(model.contextWindow);
+  if (base !== void 0) {
+    const reserved = catalogReservedTokens(model);
+    const limited = limitedContextWindow(base, reserved, budget);
+    if (limited !== void 0 && limited !== base) {
+      next.contextWindow = limited;
+      next.upstreamContextWindow = base;
+      const compactAt = estimatedCompactionTokens(limited, reserved);
+      if (compactAt !== void 0) next.estimatedCompactionTokens = compactAt;
+    }
+  }
+  const extended = positive2(model.maxContextWindow);
+  if (extended !== void 0) {
+    const reserved = catalogReservedTokens(model, true);
+    const limited = limitedContextWindow(extended, reserved, budget);
+    if (limited !== void 0 && limited !== extended) {
+      next.maxContextWindow = limited;
+      next.upstreamMaxContextWindow = extended;
+    }
+  }
+  return next;
+}
+
 // src/core/account-cleanup.ts
 function accountSnapshotKeys(account) {
   return [
@@ -2325,7 +2394,7 @@ var package_default = {
     typecheck: "tsc --noEmit",
     check: "npm run typecheck && npm test && npm run test:errors && npm run build && npm run test:client && npm run test:host && npm run test:package",
     "test:client": "node --test tests/client.test.mjs",
-    "test:errors": "node --import ./tests/resolve-vendor.mjs --test --experimental-transform-types tests/qoder-errors.test.mjs tests/qoder-efforts.test.mjs tests/qoder-queue.test.mjs tests/sse-truncation.test.mjs tests/buddy-errors.test.mjs tests/buddy-catalog.test.mjs tests/buddy-system.test.mjs tests/trae-cache.test.mjs tests/trae-context.test.mjs tests/trae-offpeak.test.mjs tests/discount-unified.test.mjs tests/discount-unified-live.test.mjs tests/trae-offpeak-live.test.mjs tests/context-report.test.mjs tests/codearts-directory-auth.test.mjs tests/codearts-credits.test.mjs tests/raccoon-image-bridge.test.mjs tests/loomy-raccoon-credits.test.mjs tests/gemini-signature.test.mjs tests/gemini-sigstore.test.mjs",
+    "test:errors": "node --import ./tests/resolve-vendor.mjs --test --experimental-transform-types tests/qoder-errors.test.mjs tests/qoder-efforts.test.mjs tests/qoder-queue.test.mjs tests/sse-truncation.test.mjs tests/buddy-errors.test.mjs tests/buddy-catalog.test.mjs tests/buddy-system.test.mjs tests/trae-cache.test.mjs tests/trae-context.test.mjs tests/trae-offpeak.test.mjs tests/discount-unified.test.mjs tests/discount-unified-live.test.mjs tests/trae-offpeak-live.test.mjs tests/context-report.test.mjs tests/codearts-directory-auth.test.mjs tests/codearts-credits.test.mjs tests/raccoon-image-bridge.test.mjs tests/loomy-raccoon-credits.test.mjs tests/gemini-signature.test.mjs tests/gemini-sigstore.test.mjs tests/context-budget.test.mjs",
     "test:host": "node scripts/verify-host.mjs",
     "pack:local": "node scripts/pack.mjs",
     format: 'prettier --write "src/**/*.ts" "src/drivers/*.js" "tests/*" "scripts/*.mjs"',
@@ -2632,9 +2701,9 @@ function tokenText(value) {
 }
 function contextTier(model) {
   if (!model) return void 0;
-  const positive2 = (v) => typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.trunc(v) : void 0;
-  const base = positive2(model.contextWindow);
-  const rawMax = positive2(model.maxContextWindow);
+  const positive3 = (v) => typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.trunc(v) : void 0;
+  const base = positive3(model.contextWindow);
+  const rawMax = positive3(model.maxContextWindow);
   const extended = rawMax !== void 0 && (base === void 0 || rawMax > base) ? rawMax : void 0;
   if (base === void 0 && extended === void 0) return void 0;
   return {
@@ -21267,13 +21336,13 @@ function parseGeminiCatalog(body, supportedId) {
   const exact = rows.find(([id]) => id === supportedId)?.[1];
   const raw = exact ?? rows[0][1];
   const efforts = rows.map(([id]) => id.slice(supportedId.length + 1)).filter((t) => ["low", "medium", "high", "tiered"].includes(t));
-  const positive2 = (v) => typeof v === "number" && Number.isFinite(v) && v > 0 ? v : void 0;
+  const positive3 = (v) => typeof v === "number" && Number.isFinite(v) && v > 0 ? v : void 0;
   return [
     {
       id: supportedId,
       name: typeof exact?.displayName === "string" ? exact.displayName : supportedId,
-      contextWindow: positive2(raw.inputTokenLimit),
-      maxTokens: positive2(raw.outputTokenLimit),
+      contextWindow: positive3(raw.inputTokenLimit),
+      maxTokens: positive3(raw.outputTokenLimit),
       supportsImage: raw.supportsImages === true,
       effortOptions: efforts.length ? efforts : void 0,
       defaultEffort: efforts.includes("medium") ? "medium" : efforts[0]
@@ -22902,6 +22971,7 @@ async function createDrivers(ctx, { catalog, observer, store }) {
   };
   const pool = new AccountPool(ctx), drivers = /* @__PURE__ */ new Map(), pending = /* @__PURE__ */ new Map();
   const selection = new AccountSelection(store, (id) => pool.findAccount(id));
+  let contextBudget;
   const read = async (a) => {
     const v = await ctx.credentials.resolve(a.credentialRef);
     return v ? parse(v.value) : void 0;
@@ -23011,7 +23081,7 @@ async function createDrivers(ctx, { catalog, observer, store }) {
           return { data: v.data, mediaType: v.ref?.mediaType ?? v.mediaType };
         },
         // 缩放投影（见 createDrivers 顶部的 imageRequestBridge 注释）：
-        // 没有它，每张图都按原始字节内联，raccoon/qoder 的请求体上限必被顶穿。
+        // 没有它，每张图都按原始字节内联，raccoon/qoder 的请求体上限必被超出。
         readImageRequest: imageRequestBridge,
         fetchImpl: observer.fetcher(channelFetch),
         fetchRemoteModels: async () => product.fallbackModels,
@@ -23296,10 +23366,25 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         const extended = id === "trae" && product.maxMode === true;
         return [...models.values()].filter((m) => !hidden.has(m.id)).map((m) => {
           const rate = rateLabel(m);
-          const tier = extendedTierLabel(m, extended);
+          const baseWindow = limitedContextWindow(
+            m.contextWindow,
+            m.maxOutputTokens ?? m.maxTokens,
+            contextBudget
+          );
+          const extendedWindow = m.maxContextWindow === void 0 ? void 0 : limitedContextWindow(
+            m.maxContextWindow,
+            m.maxModeOutputTokens ?? m.maxOutputTokens ?? m.maxTokens,
+            contextBudget
+          );
+          const limited = {
+            ...m,
+            ...baseWindow === void 0 ? {} : { contextWindow: baseWindow },
+            ...extendedWindow === void 0 ? {} : { maxContextWindow: extendedWindow }
+          };
+          const tier = extendedTierLabel(limited, extended);
           const decorated = (rate === void 0 ? m.name : m.name + " \xB7 " + rate) + (tier === void 0 ? "" : " \xB7 " + tier);
           return {
-            ...m,
+            ...limited,
             inputModalities: m.supportsImage === true || m.supportsImages === true ? ["text", "image"] : ["text"],
             provider: "channel-hub/" + id,
             name: decorated
@@ -23319,18 +23404,36 @@ async function createDrivers(ctx, { catalog, observer, store }) {
             return () => ({ id: "channel-hub/" + id, name: name2 });
           if (k === "listModels" || k === "listAllModels") return visible;
           if (k === "resolveModel")
-            return async (_p, m, signal) => ({
-              ...await adapter.resolveModel(id, m, signal),
-              provider: "channel-hub/" + id
-            });
+            return async (_p, m, signal) => {
+              const resolved = await adapter.resolveModel(id, m, signal);
+              const window = limitedContextWindow(
+                resolved.context?.contextWindow,
+                resolved.defaultMaxTokens,
+                contextBudget
+              );
+              return {
+                ...resolved,
+                provider: "channel-hub/" + id,
+                ...window === void 0 ? {} : { context: { contextWindow: window } }
+              };
+            };
           if (k === "prepareCall")
             return async (_p, m, signal) => {
               if (!(await visible()).some((x) => x.id === m))
                 throw Error("\u6A21\u578B\u672A\u5728\u52A8\u6001\u76EE\u5F55\u4E2D\u542F\u7528");
               const prepared = await adapter.prepareCall(id, m, signal);
+              const window = limitedContextWindow(
+                prepared.model?.context?.contextWindow,
+                prepared.model?.defaultMaxTokens,
+                contextBudget
+              );
               return {
                 ...prepared,
-                model: { ...prepared.model, provider: "channel-hub/" + id },
+                model: {
+                  ...prepared.model,
+                  provider: "channel-hub/" + id,
+                  ...window === void 0 ? {} : { context: { contextWindow: window } }
+                },
                 stream: (opts) => streamWithSelection(
                   opts,
                   m,
@@ -23564,6 +23667,23 @@ async function createDrivers(ctx, { catalog, observer, store }) {
     drivers,
     login,
     pending,
+    /**
+     * 全局「单次请求输入预算」。
+     *
+     * `null` = 跟随上游（默认，行为与未实现该功能时一致）。档位是固定集合
+     * （见 `core/context-limit.ts`）：低于最大输出预留的数值会让宿主算不出
+     * 可用输入预算，故不接受任意数字。
+     */
+    contextBudget: {
+      get: () => contextBudget ?? null,
+      set: async (value) => {
+        if (value !== null && !isContextBudgetTier(value))
+          throw Error("\u4E0D\u652F\u6301\u7684\u8F93\u5165\u9884\u7B97\u6863\u4F4D");
+        contextBudget = normalizeContextBudget(value);
+        await store.call("set", "context-budget", contextBudget ?? null);
+        ctx.emit("llm/adapters-updated");
+      }
+    },
     loginsIdle: () => ![...pending.values()].some((p) => p.status === "pending"),
     async waitForLogins() {
       while ([...pending.values()].some((p) => p.status === "pending"))
@@ -23586,6 +23706,7 @@ async function createDrivers(ctx, { catalog, observer, store }) {
         const driver = drivers.get("trae");
         if (driver?.product) driver.product.maxMode = saved;
       }
+      contextBudget = normalizeContextBudget(await store.call("get", "context-budget"));
     },
     async hydrate() {
       for (const d of drivers.values()) await d.hydrate?.();
@@ -23747,6 +23868,7 @@ async function apply(ctx) {
   const dispatch = async (method, p = {}) => {
     if (method === "channels.list") {
       const accounts = await engine.pool.listAllAccounts();
+      const budget = engine.contextBudget.get() ?? void 0;
       return Promise.all(
         [...engine.drivers.values()].map(async (d) => ({
           id: d.id,
@@ -23778,6 +23900,7 @@ async function apply(ctx) {
           accounts: await Promise.all(
             accounts.filter((a) => a.provider === d.id).map(async (a) => {
               const balance = await store.call("get", "balance:" + a.id);
+              const snapshot = await catalog.load(d.id + ":" + a.id);
               return {
                 id: a.id,
                 provider: a.provider,
@@ -23792,7 +23915,12 @@ async function apply(ctx) {
                 credits: creditReading(balance),
                 balance,
                 catalog: {
-                  ...await catalog.load(d.id + ":" + a.id),
+                  ...snapshot,
+                  // 只改**响应副本**：窗口按全局预算钳制，并附上游原值与
+                  // 估算压缩点；`catalog:*` 快照保持上游真值不动。
+                  models: (snapshot.models ?? []).map(
+                    (m) => displayLimitedModel(m, budget)
+                  ),
                   disabled: [...engine.pool.disabledModelsFor(d.id)]
                 }
               };
@@ -23819,6 +23947,17 @@ async function apply(ctx) {
       await d.extendedContext.set(p.enabled);
       ctx.emit("llm/adapters-updated");
       return true;
+    }
+    if (method === "settings.get") {
+      return {
+        contextBudget: engine.contextBudget.get(),
+        contextBudgetTiers: CONTEXT_BUDGET_TIERS,
+        contextBudgetHeadroom: CONTEXT_BUDGET_HEADROOM
+      };
+    }
+    if (method === "channels.setContextBudget") {
+      await engine.contextBudget.set(p.budget ?? null);
+      return { contextBudget: engine.contextBudget.get() };
     }
     if (method === "login.start") return engine.login(String(p.provider), p);
     if (method === "login.poll") {

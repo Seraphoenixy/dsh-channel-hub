@@ -17,8 +17,8 @@ import {
  * 拿不到 `sigStore` ⇒ 每轮工具调用都不带签名 ⇒ 上游 400
  * `Function call is missing a thought_signature in functionCall parts`。
  *
- * 接线本身由驱动层负责（构建产物里可见 `createGeminiSigStore(ctx)`），这里锁住
- * 缓存自己的契约：落在 channel-pack 目录（**不能**塞进 state.json）、键可复现、
+ * 接线本身由驱动层负责（构建产物里可见 `createGeminiSigStore(ctx)`），这里锁定
+ * 缓存自己的契约：落在 channel-pack 目录（**不能**写入 state.json）、键可复现、
  * 落盘后重新载入仍能命中。夹具全部在临时目录，不读真实账号。
  */
 

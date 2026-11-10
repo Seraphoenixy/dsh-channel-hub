@@ -125,7 +125,7 @@ test("Trae declares the extended window only when the remote sends one", async (
 });
 
 test("Trae refuses Max mode when the remote flags it without a window", async () => {
-  // 旧实现会落到 `?? TRAE_MAX_CONTEXT_TOKENS`，替上游编造 1M —— 这里锁住修正。
+  // 旧实现会落到 `?? TRAE_MAX_CONTEXT_TOKENS`，替上游编造 1M —— 这里锁定修正。
   const { adapter } = adapterWith([MODEL_MAX_WITHOUT_WINDOW], true);
   const resolved = await adapter.resolveModel("trae", "max-no-window");
   assert.equal(resolved.context?.contextWindow, 116_000);

@@ -178,11 +178,11 @@ export function redact(error: unknown): string {
   return (text.length > 0 ? text : "未知错误（抛出物不可读）").slice(0, 1600);
 }
 
-/** {@link redact} 的取值链；只负责"读出人话"，不做脱敏。 */
+/** {@link redact} 的取值链；只负责"输出可读文本"，不做脱敏。 */
 function describeThrown(error: unknown): string {
   if (error instanceof Error) {
     // `AbortError` 的 message 是 `This operation was aborted` —— 单独点明
-    // 语义，否则用户会以为这是上游故障（它其实是"这次请求被取消了"）。
+    // 语义，否则用户会以为这是上游故障（它实际是"这次请求被取消了"）。
     const message = error.message;
     if (error.name === "AbortError")
       return message.length > 0 ? "请求已取消：" + message : "请求已取消";

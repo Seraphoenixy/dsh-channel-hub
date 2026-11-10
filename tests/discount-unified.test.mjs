@@ -20,7 +20,7 @@ import { promotionsFromConfig } from "../src/core/promotion.ts";
  * | Buddy | 只校验 `validFrom`/`validUntil`，不看 `daily` | 中午显示夜间价 |
  * | Trae | 只读 `activity_discount.data.current`（抓取快照） | 窗口外抓 ⇒ 折扣整条消失 |
  *
- * 现在只有 `isActive()` 一条判据，本文件逐渠道钉死它。
+ * 现在只有 `isActive()` 一条判据，本文件逐渠道锁定它。
  */
 
 /* ─────────────────────────── Qoder ─────────────────────────── */

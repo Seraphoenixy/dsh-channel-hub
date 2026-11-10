@@ -367,6 +367,93 @@ test("each transport retry is logged, while final request counts once", async (t
   assert.equal(db.stats().totals.attempts, 2);
   assert.equal(db.stats().totals.attemptFailures, 1);
 });
+test(
+  "收尾写入期间消费方取消 body 不把已成功的 attempt 判成失败",
+  { timeout: 5000 },
+  async (t) => {
+    const { db } = fixture(t);
+    /**
+     * 真实竞态（2026-11-10 qodercn 实例）：适配器读完最后一帧就结束迭代，
+     * 消费方随即取消 body，而 `pull` 正卡在 `finish("success")` 的落库上。
+     * 旧实现在控制器已关闭后再 `close()`，抛
+     * `Invalid state: Controller is already closed`，外层 `catch` 把它记成
+     * failed —— 于是同一轮日志里「结果 success、首字有值、速度/吞吐两列都是
+     * —」，账号日汇总行也失去样本。
+     */
+    let openGate: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (openGate = resolve));
+    let markBlocked: () => void = () => {};
+    const blocked = new Promise<void>((resolve) => (markBlocked = resolve));
+    let releaseUpstream: () => void = () => {};
+    const upstreamGate = new Promise<void>(
+      (resolve) => (releaseUpstream = resolve),
+    );
+    let writes = 0;
+    const store = {
+      async call(method: string, ...args: any[]) {
+        const result = (db as any)[method](...args);
+        // 第 1 次是 attempt 创建，第 2 次正是收尾写入。
+        if (method === "attempt" && ++writes === 2) {
+          markBlocked();
+          await gate;
+        }
+        return result;
+      },
+    };
+    const o = new Observer(store, { warn() {} });
+    // 上游：首帧立即给出，随后挂起，直到测试放行才发 usage 帧并结束 ——
+    // 这样「首字时刻」必然早于收尾写入，两类样本都可稳定断言。
+    const base = async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                'data: {"choices":[{"delta":{"content":"Q"}}]}\n',
+              ),
+            );
+          },
+          async pull(controller) {
+            await upstreamGate;
+            controller.enqueue(
+              new TextEncoder().encode(
+                'data: {"usage":{"prompt_tokens":10,"completion_tokens":5}}\n',
+              ),
+            );
+            controller.close();
+          },
+        }),
+      );
+    async function* run() {
+      o.bindAccount("one");
+      const response = await o.fetcher(base)(
+        "https://example.test/chat/completions",
+        { method: "POST" },
+      );
+      const reader = response.body!.getReader();
+      assert.equal((await reader.read()).done, false);
+      // 先产出一帧文本（首字时刻），再放行 EOF，让收尾写入晚于首字。
+      yield { type: "text-delta", text: "kept" };
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      releaseUpstream();
+      // 这一读拿到 usage 帧；随后的自动 pull 读到 EOF 并开始收尾写入。
+      const usage = reader.read();
+      await blocked;
+      const cancelling = reader.cancel("适配器读完最后一帧").catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      openGate();
+      await Promise.all([cancelling, usage]);
+    }
+    for await (const _ of o.stream("qodercn", "dfmodel", run)) {
+    }
+    const item = db.list().items[0];
+    const final = item.attempts.at(-1)!;
+    assert.equal(final.outcome, "success");
+    assert.equal(final.error, undefined);
+    assert.equal(item.metrics.speedSamples, 1);
+    assert.equal(item.metrics.throughputSamples, 1);
+  },
+);
 test("storage failure does not change generated result and reports health", async () => {
   const o = new Observer(
     {
